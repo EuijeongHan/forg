@@ -15,11 +15,10 @@ EXCLUDE_KEYWORDS = ["기업인수목적", "스팩", "SPAC"]
 
 pending_selections: dict[str, dict[str, str]] = {}
 disclosure_cache: dict[str, dict] = {}
-_corp_cache: list[tuple[str, str, str]] = []  # (code, name, stock_code)
+_corp_cache: list[tuple[str, str, str]] = []
 
 
 async def load_corp_cache():
-    """DART 기업 코드 XML 캐싱 (앱 시작 후 첫 검색 시 1회만 로드)"""
     global _corp_cache
     if _corp_cache:
         return
@@ -47,7 +46,6 @@ async def load_corp_cache():
 
 async def search_corps(corp_name: str) -> list[tuple[str, str]]:
     await load_corp_cache()
-
     exact = []
     starts_with = []
     partial = []
@@ -60,9 +58,7 @@ async def search_corps(corp_name: str) -> list[tuple[str, str]]:
             continue
         if name in seen_names:
             continue
-
         seen_names.add(name)
-
         if name == corp_name:
             exact.append((code, name))
         elif name.startswith(corp_name):
@@ -84,7 +80,7 @@ async def get_or_create_user(session, chat_id: str, first_name: str) -> None:
         await session.flush()
 
 
-def build_add_keyboard(results: list[tuple[str, str]], selected: dict[str, str]) -> InlineKeyboardMarkup:
+def build_add_keyboard(results, selected):
     keyboard = []
     for code, name in results:
         label = f"✅ {name}" if code in selected else name
@@ -100,55 +96,42 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(User).where(User.chat_id == chat_id))
         user = result.scalar_one_or_none()
-
         if not user:
             user = User(chat_id=chat_id, first_name=first_name)
             session.add(user)
             await session.commit()
-            await update.message.reply_text(
-                f"안녕하세요 {first_name}님 👋\n"
-                f"foRG에 오신 것을 환영합니다.\n\n"
-                f"📌 명령어 안내\n"
-                f"/add 기업명 - 관심 기업 등록\n"
-                f"/remove 기업명 - 관심 기업 삭제\n"
-                f"/list - 등록된 기업 목록 확인\n"
-                f"/today - 오늘 중요 공시 전체\n"
-                f"/mytoday - 내 기업 오늘 공시"
-            )
-        else:
-            await update.message.reply_text(
-                f"반갑습니다 {first_name}님 👋\n"
-                f"이미 등록된 계정입니다.\n\n"
-                f"📌 명령어 안내\n"
-                f"/add 기업명 - 관심 기업 등록\n"
-                f"/remove 기업명 - 관심 기업 삭제\n"
-                f"/list - 등록된 기업 목록 확인\n"
-                f"/today - 오늘 중요 공시 전체\n"
-                f"/mytoday - 내 기업 오늘 공시"
-            )
+        msg = (
+            f"안녕하세요 {first_name}님 👋\n"
+            "foRG에 오신 것을 환영합니다.\n\n"
+            "📌 명령어 안내\n"
+            "/add 기업명 - 관심 기업 등록\n"
+            "/remove 기업명 - 관심 기업 삭제\n"
+            "/list - 등록된 기업 목록\n"
+            "/today - 오늘 중요 공시 전체\n"
+            "/mytoday - 내 기업 오늘 공시\n"
+            "/keyword - /today 키워드 필터\n"
+            "/mykeyword - /mytoday 키워드 필터\n"
+            "/settings - 설정"
+        )
+        await update.message.reply_text(msg)
 
 
 async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-
     if not context.args:
         await update.message.reply_text("기업명을 입력해주세요.\n예) /add 삼성전자")
         return
 
     corp_name_query = " ".join(context.args)
     await update.message.reply_text(f"🔍 '{corp_name_query}' 검색 중...")
-
     results = await search_corps(corp_name_query)
 
     if not results:
-        await update.message.reply_text(
-            f"'{corp_name_query}'를 찾을 수 없습니다.\n정확한 기업명으로 다시 시도해주세요."
-        )
+        await update.message.reply_text(f"'{corp_name_query}'를 찾을 수 없습니다.")
         return
 
     context.user_data["search_results"] = {code: name for code, name in results}
     pending_selections[chat_id] = {}
-
     reply_markup = build_add_keyboard(results, {})
     await update.message.reply_text(
         f"🔍 '{corp_name_query}' 검색 결과입니다.\n등록할 기업을 선택하고 완료 버튼을 눌러주세요.",
@@ -159,13 +142,11 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def toggle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     chat_id = str(query.from_user.id)
     _, corp_code, corp_name = query.data.split(":", 2)
 
     if chat_id not in pending_selections:
         pending_selections[chat_id] = {}
-
     if corp_code in pending_selections[chat_id]:
         del pending_selections[chat_id][corp_code]
     else:
@@ -180,7 +161,6 @@ async def toggle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def confirm_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     chat_id = str(query.from_user.id)
     first_name = query.from_user.first_name or ""
     selected = pending_selections.pop(chat_id, {})
@@ -191,10 +171,8 @@ async def confirm_add_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     added = []
     skipped = []
-
     async with AsyncSessionLocal() as session:
         await get_or_create_user(session, chat_id, first_name)
-
         for corp_code, corp_name in selected.items():
             existing = await session.execute(
                 select(Watchlist).where(
@@ -205,7 +183,6 @@ async def confirm_add_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             if existing.scalar_one_or_none():
                 skipped.append(corp_name)
                 continue
-
             session.add(Watchlist(
                 id=str(uuid.uuid4()),
                 chat_id=chat_id,
@@ -213,27 +190,23 @@ async def confirm_add_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 corp_name=corp_name,
             ))
             added.append(corp_name)
-
         await session.commit()
 
     msg = ""
     if added:
         msg += "✅ 등록 완료:\n" + "\n".join(f"• {n}" for n in added)
     if skipped:
-        msg += "\n\n⚠️ 이미 등록된 기업:\n" + "\n".join(f"• {n}" for n in skipped)
-
+        msg += "\n\n이미 등록된 기업:\n" + "\n".join(f"• {n}" for n in skipped)
     await query.edit_message_text(msg)
 
 
 async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-
     if not context.args:
         await update.message.reply_text("기업명을 입력해주세요.\n예) /remove 삼성전자")
         return
 
     corp_name_query = " ".join(context.args)
-
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(Watchlist).where(
@@ -251,14 +224,12 @@ async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(f"🗑️ {w.corp_name}", callback_data=f"remove:{w.corp_code}:{w.corp_name}")]
         for w in watchlist
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("삭제할 기업을 선택해주세요.", reply_markup=reply_markup)
+    await update.message.reply_text("삭제할 기업을 선택해주세요.", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     chat_id = str(query.from_user.id)
     _, corp_code, corp_name = query.data.split(":", 2)
 
@@ -270,11 +241,9 @@ async def remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         )
         watchlist = result.scalar_one_or_none()
-
         if not watchlist:
             await query.edit_message_text(f"'{corp_name}'을 찾을 수 없습니다.")
             return
-
         await session.delete(watchlist)
         await session.commit()
 
@@ -283,17 +252,12 @@ async def remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def list_corps(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(Watchlist).where(Watchlist.chat_id == chat_id)
-        )
+        result = await session.execute(select(Watchlist).where(Watchlist.chat_id == chat_id))
         watchlist = result.scalars().all()
 
     if not watchlist:
-        await update.message.reply_text(
-            "등록된 기업이 없습니다.\n/add 기업명으로 등록해주세요."
-        )
+        await update.message.reply_text("등록된 기업이 없습니다.\n/add 기업명으로 등록해주세요.")
         return
 
     corp_list = "\n".join([f"• {w.corp_name}" for w in watchlist])
@@ -301,14 +265,33 @@ async def list_corps(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
     await update.message.reply_text("📋 오늘 중요 공시 불러오는 중...")
 
-    from dart import fetch_recent_disclosures, is_important
-    disclosures = await fetch_recent_disclosures()
-    important = [d for d in disclosures if is_important(d.get("report_nm", ""))]
+    from dart import fetch_today_disclosures_from_db, fetch_recent_disclosures, save_disclosures_to_db
+
+    important = await fetch_today_disclosures_from_db(important_only=True)
+    if not important:
+        disclosures = await fetch_recent_disclosures()
+        await save_disclosures_to_db(disclosures)
+        important = await fetch_today_disclosures_from_db(important_only=True)
 
     if not important:
         await update.message.reply_text("오늘 중요 공시가 없습니다.")
+        return
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(User).where(User.chat_id == chat_id))
+        user = result.scalar_one_or_none()
+        keywords = []
+        if user and user.today_keywords:
+            keywords = [k.strip() for k in user.today_keywords.split(",") if k.strip()]
+
+    if keywords:
+        important = [d for d in important if any(k in d.get("report_nm", "") or k in d.get("corp_name", "") for k in keywords)]
+
+    if not important:
+        await update.message.reply_text("키워드에 해당하는 공시가 없습니다.")
         return
 
     for d in important:
@@ -321,10 +304,10 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )]
         for d in important[:20]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    kw_txt = f" (키워드: {', '.join(keywords)})" if keywords else ""
     await update.message.reply_text(
-        f"📋 오늘 중요 공시 ({len(important)}건)\n공시를 선택하면 요약을 보여드립니다.",
-        reply_markup=reply_markup,
+        f"📋 오늘 중요 공시 ({len(important)}건){kw_txt}\n공시를 선택하면 요약을 보여드립니다.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -333,9 +316,7 @@ async def mytoday(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📋 내 기업 오늘 공시 불러오는 중...")
 
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(Watchlist).where(Watchlist.chat_id == chat_id)
-        )
+        result = await session.execute(select(Watchlist).where(Watchlist.chat_id == chat_id))
         watchlist = result.scalars().all()
 
     if not watchlist:
@@ -346,6 +327,16 @@ async def mytoday(update: Update, context: ContextTypes.DEFAULT_TYPE):
     disclosures = await fetch_recent_disclosures()
     my_corp_codes = {w.corp_code for w in watchlist}
     my_disclosures = [d for d in disclosures if d.get("corp_code") in my_corp_codes]
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(User).where(User.chat_id == chat_id))
+        user = result.scalar_one_or_none()
+        keywords = []
+        if user and user.mytoday_keywords:
+            keywords = [k.strip() for k in user.mytoday_keywords.split(",") if k.strip()]
+
+    if keywords:
+        my_disclosures = [d for d in my_disclosures if any(k in d.get("report_nm", "") or k in d.get("corp_name", "") for k in keywords)]
 
     if not my_disclosures:
         await update.message.reply_text("내 기업의 오늘 공시가 없습니다.")
@@ -361,10 +352,10 @@ async def mytoday(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )]
         for d in my_disclosures[:20]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    kw_txt = f" (키워드: {', '.join(keywords)})" if keywords else ""
     await update.message.reply_text(
-        f"📋 내 기업 오늘 공시 ({len(my_disclosures)}건)\n공시를 선택하면 요약을 보여드립니다.",
-        reply_markup=reply_markup,
+        f"📋 내 기업 오늘 공시 ({len(my_disclosures)}건){kw_txt}\n공시를 선택하면 요약을 보여드립니다.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -379,7 +370,6 @@ async def view_disclosure_callback(update: Update, context: ContextTypes.DEFAULT
     corp_code = disclosure.get("corp_code", "")
     rcept_dt = disclosure.get("rcept_dt", "")
 
-    # 캐시 미스 시 DART API로 재조회
     if not corp_code or not rcept_dt:
         from dart import fetch_recent_disclosures
         disclosures = await fetch_recent_disclosures()
@@ -396,15 +386,14 @@ async def view_disclosure_callback(update: Update, context: ContextTypes.DEFAULT
 
     from dart import fetch_disclosure_detail, fetch_typed_disclosure
     from summarizer import summarize_disclosure, summarize_typed_disclosure
-    
+
     typed_data = {}
     if corp_code and rcept_dt:
         typed_data = await fetch_typed_disclosure(corp_code, receipt_no, report_nm, rcept_dt)
-    
+
     if typed_data:
         summary = await summarize_typed_disclosure(corp_name, report_nm, typed_data)
     else:
-        # 2순위: 원문 크롤링
         content = await fetch_disclosure_detail(receipt_no)
         summary = await summarize_disclosure(corp_name, report_nm, content)
 
@@ -418,30 +407,9 @@ async def view_disclosure_callback(update: Update, context: ContextTypes.DEFAULT
     await query.message.reply_text(msg, parse_mode="HTML")
 
 
-def create_bot_app() -> Application:
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("add", add))
-    app.add_handler(CommandHandler("remove", remove))
-    app.add_handler(CommandHandler("list", list_corps))
-    app.add_handler(CommandHandler("today", today))
-    app.add_handler(CommandHandler("mytoday", mytoday))
-    app.add_handler(CallbackQueryHandler(toggle_callback, pattern="^toggle:"))
-    app.add_handler(CallbackQueryHandler(confirm_add_callback, pattern="^confirm_add$"))
-    app.add_handler(CallbackQueryHandler(remove_callback, pattern="^remove:"))
-    app.add_handler(CallbackQueryHandler(view_disclosure_callback, pattern="^view:"))
-    app.add_handler(CommandHandler("keyword", keyword))
-    app.add_handler(CommandHandler("mykeyword", mykeyword))
-    app.add_handler(CommandHandler("settings", settings))
-    app.add_handler(CallbackQueryHandler(toggle_sync_callback, pattern="^toggle_sync$"))
-    return app
-
-
 async def keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-
     async with AsyncSessionLocal() as session:
-        from sqlalchemy import select
         result = await session.execute(select(User).where(User.chat_id == chat_id))
         user = result.scalar_one_or_none()
         if not user:
@@ -451,12 +419,7 @@ async def keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args:
             current = user.today_keywords or "없음"
             await update.message.reply_text(
-                f"📌 현재 /today 키워드: {current}
-
-"
-                f"설정 방법: /keyword 전환사채 유상증자
-"
-                f"초기화: /keyword 삭제"
+                "📌 현재 /today 키워드: " + current + "\n\n설정: /keyword 전환사채 유상증자\n초기화: /keyword 삭제"
             )
             return
 
@@ -466,20 +429,18 @@ async def keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ /today 키워드가 초기화됐습니다.")
             return
 
-        keywords = ",".join(context.args)
-        user.today_keywords = keywords
+        kw = ",".join(context.args)
+        user.today_keywords = kw
         if user.sync_keywords:
-            user.mytoday_keywords = keywords
+            user.mytoday_keywords = kw
         await session.commit()
         sync_txt = " (/mytoday에도 동일 적용)" if user.sync_keywords else ""
-        await update.message.reply_text(f"✅ /today 키워드 설정: {keywords}{sync_txt}")
+        await update.message.reply_text("✅ /today 키워드 설정: " + kw + sync_txt)
 
 
 async def mykeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-
     async with AsyncSessionLocal() as session:
-        from sqlalchemy import select
         result = await session.execute(select(User).where(User.chat_id == chat_id))
         user = result.scalar_one_or_none()
         if not user:
@@ -489,12 +450,7 @@ async def mykeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args:
             current = user.mytoday_keywords or "없음"
             await update.message.reply_text(
-                f"📌 현재 /mytoday 키워드: {current}
-
-"
-                f"설정 방법: /mykeyword 감자 합병
-"
-                f"초기화: /mykeyword 삭제"
+                "📌 현재 /mytoday 키워드: " + current + "\n\n설정: /mykeyword 감자 합병\n초기화: /mykeyword 삭제"
             )
             return
 
@@ -504,17 +460,15 @@ async def mykeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ /mytoday 키워드가 초기화됐습니다.")
             return
 
-        keywords = ",".join(context.args)
-        user.mytoday_keywords = keywords
+        kw = ",".join(context.args)
+        user.mytoday_keywords = kw
         await session.commit()
-        await update.message.reply_text(f"✅ /mytoday 키워드 설정: {keywords}")
+        await update.message.reply_text("✅ /mytoday 키워드 설정: " + kw)
 
 
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-
     async with AsyncSessionLocal() as session:
-        from sqlalchemy import select
         result = await session.execute(select(User).where(User.chat_id == chat_id))
         user = result.scalar_one_or_none()
         if not user:
@@ -524,25 +478,13 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sync = user.sync_keywords or False
         today_kw = user.today_keywords or "없음"
         mytoday_kw = user.mytoday_keywords or "없음"
-
-        keyboard = [[
-            InlineKeyboardButton(
-                f"키워드 동기화: {'ON ✅' if sync else 'OFF ❌'}",
-                callback_data="toggle_sync"
-            )
-        ]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        keyboard = [[InlineKeyboardButton(
+            "키워드 동기화: " + ("ON ✅" if sync else "OFF ❌"),
+            callback_data="toggle_sync"
+        )]]
         await update.message.reply_text(
-            f"⚙️ 설정
-
-"
-            f"📌 /today 키워드: {today_kw}
-"
-            f"📌 /mytoday 키워드: {mytoday_kw}
-
-"
-            f"키워드 동기화 ON 시 /keyword 설정이 /mykeyword에도 동일 적용됩니다.",
-            reply_markup=reply_markup,
+            "⚙️ 설정\n\n📌 /today 키워드: " + today_kw + "\n📌 /mytoday 키워드: " + mytoday_kw + "\n\n키워드 동기화 ON 시 /keyword 설정이 /mykeyword에도 동일 적용됩니다.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
 
@@ -552,12 +494,10 @@ async def toggle_sync_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     chat_id = str(query.from_user.id)
 
     async with AsyncSessionLocal() as session:
-        from sqlalchemy import select
         result = await session.execute(select(User).where(User.chat_id == chat_id))
         user = result.scalar_one_or_none()
         if not user:
             return
-
         user.sync_keywords = not (user.sync_keywords or False)
         if user.sync_keywords and user.today_keywords:
             user.mytoday_keywords = user.today_keywords
@@ -566,23 +506,30 @@ async def toggle_sync_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         sync = user.sync_keywords
         today_kw = user.today_keywords or "없음"
         mytoday_kw = user.mytoday_keywords or "없음"
-
-        keyboard = [[
-            InlineKeyboardButton(
-                f"키워드 동기화: {'ON ✅' if sync else 'OFF ❌'}",
-                callback_data="toggle_sync"
-            )
-        ]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        keyboard = [[InlineKeyboardButton(
+            "키워드 동기화: " + ("ON ✅" if sync else "OFF ❌"),
+            callback_data="toggle_sync"
+        )]]
         await query.edit_message_text(
-            f"⚙️ 설정
-
-"
-            f"📌 /today 키워드: {today_kw}
-"
-            f"📌 /mytoday 키워드: {mytoday_kw}
-
-"
-            f"키워드 동기화 ON 시 /keyword 설정이 /mykeyword에도 동일 적용됩니다.",
-            reply_markup=reply_markup,
+            "⚙️ 설정\n\n📌 /today 키워드: " + today_kw + "\n📌 /mytoday 키워드: " + mytoday_kw + "\n\n키워드 동기화 ON 시 /keyword 설정이 /mykeyword에도 동일 적용됩니다.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
+
+
+def create_bot_app() -> Application:
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("add", add))
+    app.add_handler(CommandHandler("remove", remove))
+    app.add_handler(CommandHandler("list", list_corps))
+    app.add_handler(CommandHandler("today", today))
+    app.add_handler(CommandHandler("mytoday", mytoday))
+    app.add_handler(CommandHandler("keyword", keyword))
+    app.add_handler(CommandHandler("mykeyword", mykeyword))
+    app.add_handler(CommandHandler("settings", settings))
+    app.add_handler(CallbackQueryHandler(toggle_callback, pattern="^toggle:"))
+    app.add_handler(CallbackQueryHandler(confirm_add_callback, pattern="^confirm_add$"))
+    app.add_handler(CallbackQueryHandler(remove_callback, pattern="^remove:"))
+    app.add_handler(CallbackQueryHandler(view_disclosure_callback, pattern="^view:"))
+    app.add_handler(CallbackQueryHandler(toggle_sync_callback, pattern="^toggle_sync$"))
+    return app
