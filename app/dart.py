@@ -192,3 +192,29 @@ async def fetch_typed_disclosure(corp_code: str, rcept_no: str, report_nm: str, 
         except Exception as e:
             print(f"정형 데이터 조회 실패: {e}")
             return {}
+
+
+async def fetch_rcept_times(date: str) -> dict[str, str]:
+    """DART 검색 페이지에서 접수번호별 제출 시간 가져오기"""
+    import re
+    url = "https://dart.fss.or.kr/dsac001/search.ax"
+    params = {"selectDate": date, "textCrpCik": "", "pageGrouping": "A"}
+    result = {}
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        try:
+            r = await client.get(url, params=params, timeout=15)
+            matches = re.findall(r'rcpNo=(\d{14}).*?(\d{2}:\d{2})', r.text, re.DOTALL)
+            for rcept_no, time_str in matches:
+                result[rcept_no] = time_str
+        except Exception as e:
+            print(f"접수 시간 조회 실패: {e}")
+    return result
+
+
+def is_after_hours(time_str: str) -> bool:
+    """오후 6시 이후 제출 여부"""
+    try:
+        hour = int(time_str.split(":")[0])
+        return hour >= 18
+    except:
+        return False
