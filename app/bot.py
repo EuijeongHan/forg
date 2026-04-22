@@ -376,16 +376,26 @@ async def view_disclosure_callback(update: Update, context: ContextTypes.DEFAULT
     disclosure = disclosure_cache.get(receipt_no, {})
     corp_name = disclosure.get("corp_name", "")
     report_nm = disclosure.get("report_nm", "")
+    corp_code = disclosure.get("corp_code", "")
+    rcept_dt = disclosure.get("rcept_dt", "")
+
+    # 캐시 미스 시 DART API로 재조회
+    if not corp_code or not rcept_dt:
+        from dart import fetch_recent_disclosures
+        disclosures = await fetch_recent_disclosures()
+        for d in disclosures:
+            if d["rcept_no"] == receipt_no:
+                corp_name = d.get("corp_name", corp_name)
+                report_nm = d.get("report_nm", report_nm)
+                corp_code = d.get("corp_code", "")
+                rcept_dt = d.get("rcept_dt", "")
+                disclosure_cache[receipt_no] = d
+                break
 
     await query.message.reply_text(f"⏳ '{corp_name}' 공시 요약 중...")
 
     from dart import fetch_disclosure_detail, fetch_typed_disclosure
     from summarizer import summarize_disclosure, summarize_typed_disclosure
-
-    # 1순위: 정형 데이터 API
-    disclosure_info = disclosure_cache.get(receipt_no, {})
-    corp_code = disclosure_info.get("corp_code", "")
-    rcept_dt = disclosure_info.get("rcept_dt", "")
     
     typed_data = {}
     if corp_code and rcept_dt:
