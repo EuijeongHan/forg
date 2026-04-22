@@ -4,9 +4,12 @@ import httpx
 DART_BASE_URL = "https://opendart.fss.or.kr/api"
 
 async def fetch_recent_disclosures() -> list[dict]:
+    from datetime import datetime
+    today = datetime.now().strftime("%Y%m%d")
     url = f"{DART_BASE_URL}/list.json"
     params = {
         "crtfc_key": DART_API_KEY,
+        "bgn_de": today,
         "page_no": 1,
         "page_count": 100,
     }
