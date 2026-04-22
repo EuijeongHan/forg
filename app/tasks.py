@@ -7,13 +7,17 @@ from summarizer import summarize_disclosure
 from notifier import send_alert
 
 async def process_disclosures():
-    """DART 공시 폴링 → 필터링 → 요약 → 알림 발송"""
+    """DART 공시 폴링 → DB 저장 → 필터링 → 요약 → 알림 발송"""
+    from dart import save_disclosures_to_db
     print("공시 폴링 시작...")
 
     disclosures = await fetch_recent_disclosures()
     if not disclosures:
         print("새로운 공시 없음")
         return
+
+    # DB에 저장
+    await save_disclosures_to_db(disclosures)
 
     async with AsyncSessionLocal() as session:
         for disclosure in disclosures:

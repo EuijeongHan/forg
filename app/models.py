@@ -24,6 +24,9 @@ class User(Base):
     first_name = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
     tier = Column(Enum(TierEnum), default=TierEnum.free)
+    today_keywords = Column(String, nullable=True)
+    mytoday_keywords = Column(String, nullable=True)
+    sync_keywords = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), default=now_utc)
 
     watchlist = relationship("Watchlist", back_populates="user")
@@ -54,3 +57,19 @@ class SeenDisclosure(Base):
     created_at = Column(DateTime(timezone=True), default=now_utc)
 
     user = relationship("User", back_populates="seen_disclosures")
+
+
+class Disclosure(Base):
+    __tablename__ = "disclosures"
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    rcept_no = Column(String, unique=True, nullable=False, index=True)
+    corp_code = Column(String, nullable=False)
+    corp_name = Column(String, nullable=False)
+    stock_code = Column(String, nullable=True)
+    corp_cls = Column(String, nullable=True)
+    report_nm = Column(String, nullable=False)
+    rcept_dt = Column(String, nullable=False, index=True)
+    flr_nm = Column(String, nullable=True)
+    is_important = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), default=now_utc)

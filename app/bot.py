@@ -430,4 +430,159 @@ def create_bot_app() -> Application:
     app.add_handler(CallbackQueryHandler(confirm_add_callback, pattern="^confirm_add$"))
     app.add_handler(CallbackQueryHandler(remove_callback, pattern="^remove:"))
     app.add_handler(CallbackQueryHandler(view_disclosure_callback, pattern="^view:"))
+    app.add_handler(CommandHandler("keyword", keyword))
+    app.add_handler(CommandHandler("mykeyword", mykeyword))
+    app.add_handler(CommandHandler("settings", settings))
+    app.add_handler(CallbackQueryHandler(toggle_sync_callback, pattern="^toggle_sync$"))
     return app
+
+
+async def keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+
+    async with AsyncSessionLocal() as session:
+        from sqlalchemy import select
+        result = await session.execute(select(User).where(User.chat_id == chat_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            await update.message.reply_text("먼저 /start 를 입력해주세요.")
+            return
+
+        if not context.args:
+            current = user.today_keywords or "없음"
+            await update.message.reply_text(
+                f"📌 현재 /today 키워드: {current}
+
+"
+                f"설정 방법: /keyword 전환사채 유상증자
+"
+                f"초기화: /keyword 삭제"
+            )
+            return
+
+        if context.args[0] == "삭제":
+            user.today_keywords = None
+            await session.commit()
+            await update.message.reply_text("✅ /today 키워드가 초기화됐습니다.")
+            return
+
+        keywords = ",".join(context.args)
+        user.today_keywords = keywords
+        if user.sync_keywords:
+            user.mytoday_keywords = keywords
+        await session.commit()
+        sync_txt = " (/mytoday에도 동일 적용)" if user.sync_keywords else ""
+        await update.message.reply_text(f"✅ /today 키워드 설정: {keywords}{sync_txt}")
+
+
+async def mykeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+
+    async with AsyncSessionLocal() as session:
+        from sqlalchemy import select
+        result = await session.execute(select(User).where(User.chat_id == chat_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            await update.message.reply_text("먼저 /start 를 입력해주세요.")
+            return
+
+        if not context.args:
+            current = user.mytoday_keywords or "없음"
+            await update.message.reply_text(
+                f"📌 현재 /mytoday 키워드: {current}
+
+"
+                f"설정 방법: /mykeyword 감자 합병
+"
+                f"초기화: /mykeyword 삭제"
+            )
+            return
+
+        if context.args[0] == "삭제":
+            user.mytoday_keywords = None
+            await session.commit()
+            await update.message.reply_text("✅ /mytoday 키워드가 초기화됐습니다.")
+            return
+
+        keywords = ",".join(context.args)
+        user.mytoday_keywords = keywords
+        await session.commit()
+        await update.message.reply_text(f"✅ /mytoday 키워드 설정: {keywords}")
+
+
+async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+
+    async with AsyncSessionLocal() as session:
+        from sqlalchemy import select
+        result = await session.execute(select(User).where(User.chat_id == chat_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            await update.message.reply_text("먼저 /start 를 입력해주세요.")
+            return
+
+        sync = user.sync_keywords or False
+        today_kw = user.today_keywords or "없음"
+        mytoday_kw = user.mytoday_keywords or "없음"
+
+        keyboard = [[
+            InlineKeyboardButton(
+                f"키워드 동기화: {'ON ✅' if sync else 'OFF ❌'}",
+                callback_data="toggle_sync"
+            )
+        ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"⚙️ 설정
+
+"
+            f"📌 /today 키워드: {today_kw}
+"
+            f"📌 /mytoday 키워드: {mytoday_kw}
+
+"
+            f"키워드 동기화 ON 시 /keyword 설정이 /mykeyword에도 동일 적용됩니다.",
+            reply_markup=reply_markup,
+        )
+
+
+async def toggle_sync_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = str(query.from_user.id)
+
+    async with AsyncSessionLocal() as session:
+        from sqlalchemy import select
+        result = await session.execute(select(User).where(User.chat_id == chat_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            return
+
+        user.sync_keywords = not (user.sync_keywords or False)
+        if user.sync_keywords and user.today_keywords:
+            user.mytoday_keywords = user.today_keywords
+        await session.commit()
+
+        sync = user.sync_keywords
+        today_kw = user.today_keywords or "없음"
+        mytoday_kw = user.mytoday_keywords or "없음"
+
+        keyboard = [[
+            InlineKeyboardButton(
+                f"키워드 동기화: {'ON ✅' if sync else 'OFF ❌'}",
+                callback_data="toggle_sync"
+            )
+        ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            f"⚙️ 설정
+
+"
+            f"📌 /today 키워드: {today_kw}
+"
+            f"📌 /mytoday 키워드: {mytoday_kw}
+
+"
+            f"키워드 동기화 ON 시 /keyword 설정이 /mykeyword에도 동일 적용됩니다.",
+            reply_markup=reply_markup,
+        )
