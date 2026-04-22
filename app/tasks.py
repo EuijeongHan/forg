@@ -2,13 +2,14 @@ import uuid
 from sqlalchemy import select
 from database import AsyncSessionLocal
 from models import SeenDisclosure, User, Watchlist
-from dart import fetch_recent_disclosures, is_important, fetch_disclosure_detail
-from summarizer import summarize_disclosure
+from dart import fetch_recent_disclosures, is_important, fetch_disclosure_detail, fetch_typed_disclosure, fetch_rcept_times, is_after_hours
+from summarizer import summarize_disclosure, summarize_typed_disclosure
 from notifier import send_alert
 
 async def process_disclosures():
     """DART 공시 폴링 → DB 저장 → 필터링 → 요약 → 알림 발송"""
     from dart import save_disclosures_to_db
+    from datetime import datetime
     print("공시 폴링 시작...")
 
     disclosures = await fetch_recent_disclosures()
@@ -16,8 +17,10 @@ async def process_disclosures():
         print("새로운 공시 없음")
         return
 
-    # DB에 저장
     await save_disclosures_to_db(disclosures)
+
+    today = datetime.now().strftime("%Y%m%d")
+    rcept_times = await fetch_rcept_times(today)
 
     async with AsyncSessionLocal() as session:
         for disclosure in disclosures:
@@ -25,12 +28,11 @@ async def process_disclosures():
             corp_name = disclosure.get("corp_name", "")
             report_nm = disclosure.get("report_nm", "")
             corp_code = disclosure.get("corp_code", "")
+            rcept_dt = disclosure.get("rcept_dt", "")
 
-            # 1. 중요 공시 유형 필터링
             if not is_important(report_nm):
                 continue
 
-            # 2. 해당 기업 watchlist 유저 조회
             result = await session.execute(
                 select(User).join(Watchlist).where(
                     Watchlist.corp_code == corp_code,
@@ -42,13 +44,27 @@ async def process_disclosures():
             if not target_users:
                 continue
 
-            # 3. 공시 원문 조회 + Claude 요약 (공시당 1번만)
-            content = await fetch_disclosure_detail(receipt_no)
-            summary = await summarize_disclosure(corp_name, report_nm, content)
+            # 제출 시간 확인
+            rcept_time = rcept_times.get(receipt_no, "")
+            after_hours = is_after_hours(rcept_time) if rcept_time else False
 
-            # 4. 유저별 처리
+            # 감사보고서 야간 제출 경고
+            is_audit = "감사보고서" in report_nm
+            time_warning = ""
+            if is_audit and after_hours:
+                time_warning = f"\n\n⚠️ 야간 제출 감지 ({rcept_time}) - 주의 필요"
+
+            # 정형 데이터 우선, 없으면 원문 크롤링
+            typed_data = await fetch_typed_disclosure(corp_code, receipt_no, report_nm, rcept_dt)
+            if typed_data:
+                summary = await summarize_typed_disclosure(corp_name, report_nm, typed_data)
+            else:
+                content = await fetch_disclosure_detail(receipt_no)
+                summary = await summarize_disclosure(corp_name, report_nm, content)
+
+            summary = summary + time_warning
+
             for user in target_users:
-                # 유저별 중복 확인
                 result = await session.execute(
                     select(SeenDisclosure).where(
                         SeenDisclosure.receipt_no == receipt_no,
@@ -58,7 +74,6 @@ async def process_disclosures():
                 if result.scalar_one_or_none():
                     continue
 
-                # 알림 발송
                 await send_alert(
                     chat_id=user.chat_id,
                     corp_name=corp_name,
@@ -67,7 +82,6 @@ async def process_disclosures():
                     summary=summary,
                 )
 
-                # seen 저장
                 seen = SeenDisclosure(
                     id=str(uuid.uuid4()),
                     receipt_no=receipt_no,
