@@ -45,3 +45,51 @@ async def fetch_disclosure_detail(receipt_no: str) -> str:
         except Exception as e:
             print(f"공시 원문 조회 실패: {e}")
             return ""
+
+
+# 공시 유형별 정형 데이터 API
+TYPED_APIS = {
+    '유상증자': 'piicDecsn',
+    '무상증자': 'fricDecsn',
+    '전환사채': 'cvbdIsDecsn',
+    '신주인수권': 'bdwtIsDecsn',
+    '교환사채': 'exbdIsDecsn',
+    '감자': 'crDecsn',
+    '합병': 'cmpMgDecsn',
+    '분할': 'cmpDvDecsn',
+    '자기주식취득': 'tsstkAqDecsn',
+    '자기주식처분': 'tsstkDpDecsn',
+}
+
+def get_api_for_report(report_nm: str) -> str:
+    for keyword, api in TYPED_APIS.items():
+        if keyword in report_nm:
+            return api
+    return None
+
+async def fetch_typed_disclosure(corp_code: str, rcept_no: str, report_nm: str, rcept_dt: str) -> dict:
+    api = get_api_for_report(report_nm)
+    if not api:
+        return {}
+    
+    url = f"{DART_BASE_URL}/{api}.json"
+    params = {
+        "crtfc_key": DART_API_KEY,
+        "corp_code": corp_code,
+        "bgn_de": rcept_dt,
+        "end_de": rcept_dt,
+    }
+    async with httpx.AsyncClient() as client:
+        try:
+            r = await client.get(url, params=params, timeout=10)
+            data = r.json()
+            if data.get("status") != "000":
+                return {}
+            # rcept_no 매칭
+            for item in data.get("list", []):
+                if item.get("rcept_no") == rcept_no:
+                    return item
+            return {}
+        except Exception as e:
+            print(f"정형 데이터 조회 실패: {e}")
+            return {}
