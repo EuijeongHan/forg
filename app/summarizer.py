@@ -118,3 +118,99 @@ async def summarize_disclosure(corp_name: str, report_nm: str, content: str) -> 
         return result
 
     return "요약 생성에 실패했습니다. DART에서 직접 확인해주세요."
+
+def format_typed_disclosure(corp_name: str, report_nm: str, data: dict) -> str:
+    """정형 데이터를 카드 뷰 형식으로 포맷팅"""
+    from datetime import datetime, date
+    today = date.today()
+
+    lines = []
+
+    if '전환사채' in report_nm or '교환사채' in report_nm:
+        lines.append("[전환사채 발행결정]")
+        if data.get('bd_fta'): lines.append(f"• 발행금액: {data['bd_fta']}원")
+        if data.get('bd_knd'): lines.append(f"• 종류: {data['bd_knd']}")
+        if data.get('bd_intr_ex'): lines.append(f"• 표면이자율: {data['bd_intr_ex']}%")
+        if data.get('bd_intr_sf'): lines.append(f"• 만기이자율: {data['bd_intr_sf']}%")
+        if data.get('bd_mtd'): lines.append(f"• 만기일: {data['bd_mtd']}")
+        if data.get('cv_prc'): lines.append(f"• 전환가액: {data['cv_prc']}원")
+        if data.get('cvrqpd_bgd'):
+            bgd = data['cvrqpd_bgd']
+            lines.append(f"• 전환청구 가능일: {bgd}")
+            # D-Day 계산
+            try:
+                d = datetime.strptime(bgd.replace('년 ', '-').replace('월 ', '-').replace('일', '').strip(), '%Y-%m-%d').date()
+                diff = (d - today).days
+                lines.append(f"• ⏰ 전환청구까지 D+{diff}일")
+            except:
+                pass
+        if data.get('fdpp_op') and data['fdpp_op'] != '-': lines.append(f"• 자금목적(운영): {data['fdpp_op']}원")
+        if data.get('fdpp_dtrp') and data['fdpp_dtrp'] != '-': lines.append(f"• 자금목적(채무상환): {data['fdpp_dtrp']}원")
+        if data.get('act_mktprcfl_cvprc_lwtrsprc_bs'): lines.append(f"• 리픽싱: {data['act_mktprcfl_cvprc_lwtrsprc_bs']}")
+
+    elif '유상증자' in report_nm:
+        lines.append("[유상증자 결정]")
+        if data.get('iscls'): lines.append(f"• 증자방식: {data['iscls']}")
+        if data.get('nstk_ostk_cnt'): lines.append(f"• 신주 발행수: {data['nstk_ostk_cnt']}주")
+        if data.get('nstk_ispr'): lines.append(f"• 발행가액: {data['nstk_ispr']}원")
+        if data.get('fdpp_op') and data['fdpp_op'] != '-': lines.append(f"• 자금목적(운영): {data['fdpp_op']}원")
+        if data.get('allot_mthn'): lines.append(f"• 배정방법: {data['allot_mthn']}")
+        if data.get('nstk_sdtpd_bgd'): lines.append(f"• 신주배정기준일: {data['nstk_sdtpd_bgd']}")
+        if data.get('pymd'): lines.append(f"• 납입일: {data['pymd']}")
+
+    elif '감자' in report_nm:
+        lines.append("[감자 결정]")
+        if data.get('cr_rt'): lines.append(f"• 감자비율: {data['cr_rt']}%")
+        if data.get('cr_mth'): lines.append(f"• 감자방법: {data['cr_mth']}")
+        if data.get('cr_rs'): lines.append(f"• 감자사유: {data['cr_rs']}")
+        if data.get('cr_dt'): lines.append(f"• 감자기일: {data['cr_dt']}")
+
+    elif '합병' in report_nm:
+        lines.append("[합병 결정]")
+        if data.get('mrgcmp_nm'): lines.append(f"• 합병대상: {data['mrgcmp_nm']}")
+        if data.get('mg_rt'): lines.append(f"• 합병비율: {data['mg_rt']}")
+        if data.get('mgdt'): lines.append(f"• 합병기일: {data['mgdt']}")
+        if data.get('mgr_nstk_ismt_atn'): lines.append(f"• 신주발행: {data['mgr_nstk_ismt_atn']}")
+
+    elif '자기주식' in report_nm:
+        if '취득' in report_nm:
+            lines.append("[자기주식 취득 결정]")
+        else:
+            lines.append("[자기주식 처분 결정]")
+        if data.get('aqpln_prc_ostk'): lines.append(f"• 보통주 취득금액: {data['aqpln_prc_ostk']}원")
+        if data.get('aqpln_stk_ostk'): lines.append(f"• 보통주 취득수량: {data['aqpln_stk_ostk']}주")
+        if data.get('aq_pp'): lines.append(f"• 취득목적: {data['aq_pp']}")
+        if data.get('aq_mth'): lines.append(f"• 취득방법: {data['aq_mth']}")
+        if data.get('aqpln_bgd'): lines.append(f"• 취득기간: {data['aqpln_bgd']} ~ {data.get('aqpln_edd', '')}")
+
+    else:
+        # 기타 유형은 데이터 그대로
+        for k, v in data.items():
+            if v and v != '-' and k not in ['rcept_no', 'corp_cls', 'corp_code', 'corp_name']:
+                lines.append(f"• {k}: {v}")
+
+    return chr(10).join(lines)
+
+
+async def summarize_typed_disclosure(corp_name: str, report_nm: str, data: dict) -> str:
+    """정형 데이터 기반 요약 - 카드 뷰 우선, AI 보완"""
+    card = format_typed_disclosure(corp_name, report_nm, data)
+    
+    if not card:
+        return "요약 생성에 실패했습니다. DART에서 직접 확인해주세요."
+    
+    # AI로 추가 인사이트 보완
+    prompt = chr(10).join([
+        f"기업명: {corp_name}",
+        f"공시 유형: {report_nm}",
+        f"공시 핵심 데이터:",
+        card,
+        "",
+        "위 데이터를 바탕으로 투자자가 주목해야 할 핵심 포인트 1-2줄만 추가해주세요. 숫자 중심으로.",
+    ])
+    
+    ai_comment = await summarize_with_openai(prompt)
+    
+    if ai_comment:
+        return card + chr(10) + chr(10) + "💡 " + ai_comment.strip()
+    return card

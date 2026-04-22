@@ -379,11 +379,24 @@ async def view_disclosure_callback(update: Update, context: ContextTypes.DEFAULT
 
     await query.message.reply_text(f"⏳ '{corp_name}' 공시 요약 중...")
 
-    from dart import fetch_disclosure_detail
-    from summarizer import summarize_disclosure
+    from dart import fetch_disclosure_detail, fetch_typed_disclosure
+    from summarizer import summarize_disclosure, summarize_typed_disclosure
 
-    content = await fetch_disclosure_detail(receipt_no)
-    summary = await summarize_disclosure(corp_name, report_nm, content)
+    # 1순위: 정형 데이터 API
+    disclosure_info = disclosure_cache.get(receipt_no, {})
+    corp_code = disclosure_info.get("corp_code", "")
+    rcept_dt = disclosure_info.get("rcept_dt", "")
+    
+    typed_data = {}
+    if corp_code and rcept_dt:
+        typed_data = await fetch_typed_disclosure(corp_code, receipt_no, report_nm, rcept_dt)
+    
+    if typed_data:
+        summary = await summarize_typed_disclosure(corp_name, report_nm, typed_data)
+    else:
+        # 2순위: 원문 크롤링
+        content = await fetch_disclosure_detail(receipt_no)
+        summary = await summarize_disclosure(corp_name, report_nm, content)
 
     dart_url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt_no}"
     msg = (
