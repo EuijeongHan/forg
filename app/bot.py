@@ -1,83 +1,16 @@
-import uuid
-import zipfile
-import io
-import xml.etree.ElementTree as ET
-import httpx
+"""Telegram handlers. I/O only — business logic lives in services/.
+
+`pending_selections` and `disclosure_cache` are process-memory UI state tied to
+the telegram interaction; they intentionally stay here (see CLAUDE.md §6-4 —
+moving them to shared storage is a later SaaS-transition task).
+"""
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from sqlalchemy import select
-from database import AsyncSessionLocal
-from models import User, Watchlist
-from config import TELEGRAM_BOT_TOKEN, DART_API_KEY
-
-DART_BASE_URL = "https://opendart.fss.or.kr/api"
-EXCLUDE_KEYWORDS = ["기업인수목적", "스팩", "SPAC"]
+from config import TELEGRAM_BOT_TOKEN
+from services import corp_service, disclosure_service, user_service, watchlist_service
 
 pending_selections: dict[str, dict[str, str]] = {}
 disclosure_cache: dict[str, dict] = {}
-_corp_cache: list[tuple[str, str, str]] = []
-
-
-async def load_corp_cache():
-    global _corp_cache
-    if _corp_cache:
-        return
-    url = f"{DART_BASE_URL}/corpCode.xml"
-    params = {"crtfc_key": DART_API_KEY}
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(url, params=params, timeout=30)
-            response.raise_for_status()
-            zip_file = zipfile.ZipFile(io.BytesIO(response.content))
-            xml_content = zip_file.read("CORPCODE.xml")
-            root = ET.fromstring(xml_content)
-            _corp_cache = [
-                (
-                    corp.findtext("corp_code", ""),
-                    corp.findtext("corp_name", ""),
-                    corp.findtext("stock_code", ""),
-                )
-                for corp in root.findall("list")
-            ]
-            print(f"기업 코드 캐시 로드 완료: {len(_corp_cache)}개")
-        except Exception as e:
-            print(f"기업 코드 캐시 로드 실패: {e}")
-
-
-async def search_corps(corp_name: str) -> list[tuple[str, str]]:
-    await load_corp_cache()
-    exact = []
-    starts_with = []
-    partial = []
-    seen_names = set()
-
-    for code, name, stock_code in _corp_cache:
-        if not (stock_code and stock_code.strip()):
-            continue
-        if any(kw in name for kw in EXCLUDE_KEYWORDS):
-            continue
-        if name in seen_names:
-            continue
-        seen_names.add(name)
-        if name == corp_name:
-            exact.append((code, name))
-        elif name.startswith(corp_name):
-            starts_with.append((code, name))
-        elif corp_name in name:
-            partial.append((code, name))
-
-    starts_with.sort(key=lambda x: x[1])
-    partial.sort(key=lambda x: x[1])
-    return (exact + starts_with + partial)[:20]
-
-
-async def get_or_create_user(session, chat_id: str, first_name: str) -> None:
-    result = await session.execute(select(User).where(User.chat_id == chat_id))
-    user = result.scalar_one_or_none()
-    if not user:
-        user = User(chat_id=chat_id, first_name=first_name)
-        session.add(user)
-        await session.flush()
 
 
 def build_add_keyboard(results, selected):
@@ -92,28 +25,21 @@ def build_add_keyboard(results, selected):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     first_name = update.effective_chat.first_name or ""
-
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(User).where(User.chat_id == chat_id))
-        user = result.scalar_one_or_none()
-        if not user:
-            user = User(chat_id=chat_id, first_name=first_name)
-            session.add(user)
-            await session.commit()
-        msg = (
-            f"안녕하세요 {first_name}님 👋\n"
-            "foRG에 오신 것을 환영합니다.\n\n"
-            "📌 명령어 안내\n"
-            "/add 기업명 - 관심 기업 등록\n"
-            "/remove 기업명 - 관심 기업 삭제\n"
-            "/list - 등록된 기업 목록\n"
-            "/today - 오늘 중요 공시 전체\n"
-            "/mytoday - 내 기업 오늘 공시\n"
-            "/keyword - /today 키워드 필터\n"
-            "/mykeyword - /mytoday 키워드 필터\n"
-            "/settings - 설정"
-        )
-        await update.message.reply_text(msg)
+    await user_service.ensure_user(chat_id, first_name)
+    msg = (
+        f"안녕하세요 {first_name}님 👋\n"
+        "foRG에 오신 것을 환영합니다.\n\n"
+        "📌 명령어 안내\n"
+        "/add 기업명 - 관심 기업 등록\n"
+        "/remove 기업명 - 관심 기업 삭제\n"
+        "/list - 등록된 기업 목록\n"
+        "/today - 오늘 중요 공시 전체\n"
+        "/mytoday - 내 기업 오늘 공시\n"
+        "/keyword - /today 키워드 필터\n"
+        "/mykeyword - /mytoday 키워드 필터\n"
+        "/settings - 설정"
+    )
+    await update.message.reply_text(msg)
 
 
 async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -124,7 +50,7 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     corp_name_query = " ".join(context.args)
     await update.message.reply_text(f"🔍 '{corp_name_query}' 검색 중...")
-    results = await search_corps(corp_name_query)
+    results = await corp_service.search_corps(corp_name_query)
 
     if not results:
         await update.message.reply_text(f"'{corp_name_query}'를 찾을 수 없습니다.")
@@ -169,28 +95,7 @@ async def confirm_add_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("선택된 기업이 없습니다.")
         return
 
-    added = []
-    skipped = []
-    async with AsyncSessionLocal() as session:
-        await get_or_create_user(session, chat_id, first_name)
-        for corp_code, corp_name in selected.items():
-            existing = await session.execute(
-                select(Watchlist).where(
-                    Watchlist.chat_id == chat_id,
-                    Watchlist.corp_code == corp_code,
-                )
-            )
-            if existing.scalar_one_or_none():
-                skipped.append(corp_name)
-                continue
-            session.add(Watchlist(
-                id=str(uuid.uuid4()),
-                chat_id=chat_id,
-                corp_code=corp_code,
-                corp_name=corp_name,
-            ))
-            added.append(corp_name)
-        await session.commit()
+    added, skipped = await watchlist_service.add_watchlist(chat_id, first_name, selected)
 
     msg = ""
     if added:
@@ -207,14 +112,7 @@ async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     corp_name_query = " ".join(context.args)
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(Watchlist).where(
-                Watchlist.chat_id == chat_id,
-                Watchlist.corp_name.ilike(f"%{corp_name_query}%"),
-            )
-        )
-        watchlist = result.scalars().all()
+    watchlist = await watchlist_service.find_by_name(chat_id, corp_name_query)
 
     if not watchlist:
         await update.message.reply_text(f"'{corp_name_query}'와 일치하는 등록 기업이 없습니다.")
@@ -233,28 +131,16 @@ async def remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(query.from_user.id)
     _, corp_code, corp_name = query.data.split(":", 2)
 
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(Watchlist).where(
-                Watchlist.chat_id == chat_id,
-                Watchlist.corp_code == corp_code,
-            )
-        )
-        watchlist = result.scalar_one_or_none()
-        if not watchlist:
-            await query.edit_message_text(f"'{corp_name}'을 찾을 수 없습니다.")
-            return
-        await session.delete(watchlist)
-        await session.commit()
+    if not await watchlist_service.remove_by_code(chat_id, corp_code):
+        await query.edit_message_text(f"'{corp_name}'을 찾을 수 없습니다.")
+        return
 
     await query.edit_message_text(f"🗑️ '{corp_name}' 삭제 완료!")
 
 
 async def list_corps(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Watchlist).where(Watchlist.chat_id == chat_id))
-        watchlist = result.scalars().all()
+    watchlist = await watchlist_service.list_watchlist(chat_id)
 
     if not watchlist:
         await update.message.reply_text("등록된 기업이 없습니다.\n/add 기업명으로 등록해주세요.")
@@ -264,32 +150,28 @@ async def list_corps(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"📋 등록된 기업 목록\n\n{corp_list}")
 
 
+def _disclosure_keyboard(disclosures: list[dict]):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"{d['corp_name']} | {d['report_nm'][:20]}",
+            callback_data=f"view:{d['rcept_no']}"
+        )]
+        for d in disclosures[:20]
+    ])
+
+
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     await update.message.reply_text("📋 오늘 중요 공시 불러오는 중...")
 
-    from dart import fetch_today_disclosures_from_db, fetch_recent_disclosures, save_disclosures_to_db
-
-    important = await fetch_today_disclosures_from_db(important_only=True)
-    if not important:
-        disclosures = await fetch_recent_disclosures()
-        await save_disclosures_to_db(disclosures)
-        important = await fetch_today_disclosures_from_db(important_only=True)
-
+    important = await disclosure_service.get_today_important()
     if not important:
         await update.message.reply_text("오늘 중요 공시가 없습니다.")
         return
 
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(User).where(User.chat_id == chat_id))
-        user = result.scalar_one_or_none()
-        keywords = []
-        if user and user.today_keywords:
-            keywords = [k.strip() for k in user.today_keywords.split(",") if k.strip()]
-
+    keywords = await user_service.get_today_keywords(chat_id)
     if keywords:
-        important = [d for d in important if any(k in d.get("report_nm", "") or k in d.get("corp_name", "") for k in keywords)]
-
+        important = disclosure_service.filter_by_keywords(important, keywords)
     if not important:
         await update.message.reply_text("키워드에 해당하는 공시가 없습니다.")
         return
@@ -297,17 +179,10 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for d in important:
         disclosure_cache[d["rcept_no"]] = d
 
-    keyboard = [
-        [InlineKeyboardButton(
-            f"{d['corp_name']} | {d['report_nm'][:20]}",
-            callback_data=f"view:{d['rcept_no']}"
-        )]
-        for d in important[:20]
-    ]
     kw_txt = f" (키워드: {', '.join(keywords)})" if keywords else ""
     await update.message.reply_text(
         f"📋 오늘 중요 공시 ({len(important)}건){kw_txt}\n공시를 선택하면 요약을 보여드립니다.",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=_disclosure_keyboard(important),
     )
 
 
@@ -315,28 +190,16 @@ async def mytoday(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     await update.message.reply_text("📋 내 기업 오늘 공시 불러오는 중...")
 
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Watchlist).where(Watchlist.chat_id == chat_id))
-        watchlist = result.scalars().all()
-
-    if not watchlist:
+    corp_codes = await watchlist_service.get_corp_codes(chat_id)
+    if not corp_codes:
         await update.message.reply_text("등록된 기업이 없습니다.\n/add 기업명으로 등록해주세요.")
         return
 
-    from dart import fetch_recent_disclosures
-    disclosures = await fetch_recent_disclosures()
-    my_corp_codes = {w.corp_code for w in watchlist}
-    my_disclosures = [d for d in disclosures if d.get("corp_code") in my_corp_codes]
+    my_disclosures = await disclosure_service.get_mytoday(corp_codes)
 
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(User).where(User.chat_id == chat_id))
-        user = result.scalar_one_or_none()
-        keywords = []
-        if user and user.mytoday_keywords:
-            keywords = [k.strip() for k in user.mytoday_keywords.split(",") if k.strip()]
-
+    keywords = await user_service.get_mytoday_keywords(chat_id)
     if keywords:
-        my_disclosures = [d for d in my_disclosures if any(k in d.get("report_nm", "") or k in d.get("corp_name", "") for k in keywords)]
+        my_disclosures = disclosure_service.filter_by_keywords(my_disclosures, keywords)
 
     if not my_disclosures:
         await update.message.reply_text("내 기업의 오늘 공시가 없습니다.")
@@ -345,17 +208,10 @@ async def mytoday(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for d in my_disclosures:
         disclosure_cache[d["rcept_no"]] = d
 
-    keyboard = [
-        [InlineKeyboardButton(
-            f"{d['corp_name']} | {d['report_nm'][:20]}",
-            callback_data=f"view:{d['rcept_no']}"
-        )]
-        for d in my_disclosures[:20]
-    ]
     kw_txt = f" (키워드: {', '.join(keywords)})" if keywords else ""
     await update.message.reply_text(
         f"📋 내 기업 오늘 공시 ({len(my_disclosures)}건){kw_txt}\n공시를 선택하면 요약을 보여드립니다.",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=_disclosure_keyboard(my_disclosures),
     )
 
 
@@ -364,128 +220,96 @@ async def view_disclosure_callback(update: Update, context: ContextTypes.DEFAULT
     await query.answer()
 
     receipt_no = query.data.split(":", 1)[1]
-    disclosure = disclosure_cache.get(receipt_no, {})
-    corp_name = disclosure.get("corp_name", "")
-    report_nm = disclosure.get("report_nm", "")
-    corp_code = disclosure.get("corp_code", "")
-    rcept_dt = disclosure.get("rcept_dt", "")
+    hint = disclosure_cache.get(receipt_no, {})
+    await query.message.reply_text(f"⏳ '{hint.get('corp_name', '')}' 공시 요약 중...")
 
-    if not corp_code or not rcept_dt:
-        from dart import fetch_recent_disclosures
-        disclosures = await fetch_recent_disclosures()
-        for d in disclosures:
-            if d["rcept_no"] == receipt_no:
-                corp_name = d.get("corp_name", corp_name)
-                report_nm = d.get("report_nm", report_nm)
-                corp_code = d.get("corp_code", "")
-                rcept_dt = d.get("rcept_dt", "")
-                disclosure_cache[receipt_no] = d
-                break
+    result = await disclosure_service.summarize_by_receipt(receipt_no, hint)
+    if result.get("resolved"):
+        disclosure_cache[receipt_no] = result["resolved"]
 
-    await query.message.reply_text(f"⏳ '{corp_name}' 공시 요약 중...")
-
-    from dart import fetch_disclosure_detail, fetch_typed_disclosure
-    from summarizer import summarize_disclosure, summarize_typed_disclosure
-
-    typed_data = {}
-    if corp_code and rcept_dt:
-        typed_data = await fetch_typed_disclosure(corp_code, receipt_no, report_nm, rcept_dt)
-
-    if typed_data:
-        summary = await summarize_typed_disclosure(corp_name, report_nm, typed_data)
-    else:
-        content = await fetch_disclosure_detail(receipt_no)
-        summary = await summarize_disclosure(corp_name, report_nm, content)
-
-    dart_url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt_no}"
     msg = (
-        f"🏢 <b>{corp_name}</b>\n"
-        f"📋 {report_nm}\n\n"
-        f"📝 <b>요약</b>\n{summary}\n\n"
-        f'🔗 <a href="{dart_url}">원문 보기</a>'
+        f"🏢 <b>{result['corp_name']}</b>\n"
+        f"📋 {result['report_nm']}\n\n"
+        f"📝 <b>요약</b>\n{result['summary']}\n\n"
+        f'🔗 <a href="{result["dart_url"]}">원문 보기</a>'
     )
     await query.message.reply_text(msg, parse_mode="HTML")
 
 
 async def keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(User).where(User.chat_id == chat_id))
-        user = result.scalar_one_or_none()
-        if not user:
-            await update.message.reply_text("먼저 /start 를 입력해주세요.")
-            return
+    user = await user_service.get_user(chat_id)
+    if not user:
+        await update.message.reply_text("먼저 /start 를 입력해주세요.")
+        return
 
-        if not context.args:
-            current = user.today_keywords or "없음"
-            await update.message.reply_text(
-                "📌 현재 /today 키워드: " + current + "\n\n설정: /keyword 전환사채 유상증자\n초기화: /keyword 삭제"
-            )
-            return
+    if not context.args:
+        current = user.today_keywords or "없음"
+        await update.message.reply_text(
+            "📌 현재 /today 키워드: " + current + "\n\n설정: /keyword 전환사채 유상증자\n초기화: /keyword 삭제"
+        )
+        return
 
-        if context.args[0] == "삭제":
-            user.today_keywords = None
-            await session.commit()
-            await update.message.reply_text("✅ /today 키워드가 초기화됐습니다.")
-            return
+    if context.args[0] == "삭제":
+        await user_service.clear_today_keywords(chat_id)
+        await update.message.reply_text("✅ /today 키워드가 초기화됐습니다.")
+        return
 
-        kw = ",".join(context.args)
-        user.today_keywords = kw
-        if user.sync_keywords:
-            user.mytoday_keywords = kw
-        await session.commit()
-        sync_txt = " (/mytoday에도 동일 적용)" if user.sync_keywords else ""
-        await update.message.reply_text("✅ /today 키워드 설정: " + kw + sync_txt)
+    kw = ",".join(context.args)
+    synced = await user_service.set_today_keywords(chat_id, kw)
+    sync_txt = " (/mytoday에도 동일 적용)" if synced else ""
+    await update.message.reply_text("✅ /today 키워드 설정: " + kw + sync_txt)
 
 
 async def mykeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(User).where(User.chat_id == chat_id))
-        user = result.scalar_one_or_none()
-        if not user:
-            await update.message.reply_text("먼저 /start 를 입력해주세요.")
-            return
+    user = await user_service.get_user(chat_id)
+    if not user:
+        await update.message.reply_text("먼저 /start 를 입력해주세요.")
+        return
 
-        if not context.args:
-            current = user.mytoday_keywords or "없음"
-            await update.message.reply_text(
-                "📌 현재 /mytoday 키워드: " + current + "\n\n설정: /mykeyword 감자 합병\n초기화: /mykeyword 삭제"
-            )
-            return
+    if not context.args:
+        current = user.mytoday_keywords or "없음"
+        await update.message.reply_text(
+            "📌 현재 /mytoday 키워드: " + current + "\n\n설정: /mykeyword 감자 합병\n초기화: /mykeyword 삭제"
+        )
+        return
 
-        if context.args[0] == "삭제":
-            user.mytoday_keywords = None
-            await session.commit()
-            await update.message.reply_text("✅ /mytoday 키워드가 초기화됐습니다.")
-            return
+    if context.args[0] == "삭제":
+        await user_service.clear_mytoday_keywords(chat_id)
+        await update.message.reply_text("✅ /mytoday 키워드가 초기화됐습니다.")
+        return
 
-        kw = ",".join(context.args)
-        user.mytoday_keywords = kw
-        await session.commit()
-        await update.message.reply_text("✅ /mytoday 키워드 설정: " + kw)
+    kw = ",".join(context.args)
+    await user_service.set_mytoday_keywords(chat_id, kw)
+    await update.message.reply_text("✅ /mytoday 키워드 설정: " + kw)
+
+
+def _settings_view(user):
+    sync = bool(user.sync_keywords)
+    today_kw = user.today_keywords or "없음"
+    mytoday_kw = user.mytoday_keywords or "없음"
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(
+        "키워드 동기화: " + ("ON ✅" if sync else "OFF ❌"),
+        callback_data="toggle_sync",
+    )]])
+    text = (
+        "⚙️ 설정\n\n📌 /today 키워드: " + today_kw
+        + "\n📌 /mytoday 키워드: " + mytoday_kw
+        + "\n\n키워드 동기화 ON 시 /keyword 설정이 /mykeyword에도 동일 적용됩니다."
+    )
+    return text, keyboard
 
 
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(User).where(User.chat_id == chat_id))
-        user = result.scalar_one_or_none()
-        if not user:
-            await update.message.reply_text("먼저 /start 를 입력해주세요.")
-            return
+    user = await user_service.get_user(chat_id)
+    if not user:
+        await update.message.reply_text("먼저 /start 를 입력해주세요.")
+        return
 
-        sync = user.sync_keywords or False
-        today_kw = user.today_keywords or "없음"
-        mytoday_kw = user.mytoday_keywords or "없음"
-        keyboard = [[InlineKeyboardButton(
-            "키워드 동기화: " + ("ON ✅" if sync else "OFF ❌"),
-            callback_data="toggle_sync"
-        )]]
-        await update.message.reply_text(
-            "⚙️ 설정\n\n📌 /today 키워드: " + today_kw + "\n📌 /mytoday 키워드: " + mytoday_kw + "\n\n키워드 동기화 ON 시 /keyword 설정이 /mykeyword에도 동일 적용됩니다.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
+    text, keyboard = _settings_view(user)
+    await update.message.reply_text(text, reply_markup=keyboard)
 
 
 async def toggle_sync_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -493,27 +317,12 @@ async def toggle_sync_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     chat_id = str(query.from_user.id)
 
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(User).where(User.chat_id == chat_id))
-        user = result.scalar_one_or_none()
-        if not user:
-            return
-        user.sync_keywords = not (user.sync_keywords or False)
-        if user.sync_keywords and user.today_keywords:
-            user.mytoday_keywords = user.today_keywords
-        await session.commit()
+    user = await user_service.toggle_sync(chat_id)
+    if not user:
+        return
 
-        sync = user.sync_keywords
-        today_kw = user.today_keywords or "없음"
-        mytoday_kw = user.mytoday_keywords or "없음"
-        keyboard = [[InlineKeyboardButton(
-            "키워드 동기화: " + ("ON ✅" if sync else "OFF ❌"),
-            callback_data="toggle_sync"
-        )]]
-        await query.edit_message_text(
-            "⚙️ 설정\n\n📌 /today 키워드: " + today_kw + "\n📌 /mytoday 키워드: " + mytoday_kw + "\n\n키워드 동기화 ON 시 /keyword 설정이 /mykeyword에도 동일 적용됩니다.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
+    text, keyboard = _settings_view(user)
+    await query.edit_message_text(text, reply_markup=keyboard)
 
 
 def create_bot_app() -> Application:
