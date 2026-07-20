@@ -21,6 +21,27 @@ async def get_db():
         finally:
             await session.close()
 
+def _run_alembic_upgrade():
+    # alembic은 동기 API라 스레드에서 실행한다 (env.py가 자체 이벤트 루프 사용)
+    from pathlib import Path
+    from alembic import command
+    from alembic.config import Config
+
+    here = Path(__file__).resolve().parent
+    cfg = Config(str(here / "alembic.ini"))
+    cfg.set_main_option("script_location", str(here / "migrations"))
+    command.upgrade(cfg, "head")
+
+
 async def init_db():
+    import asyncio
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    # create_all은 기존 테이블을 ALTER하지 않으므로 스키마 변경은 마이그레이션으로 적용
+    try:
+        await asyncio.to_thread(_run_alembic_upgrade)
+        print("DB 마이그레이션 적용 완료")
+    except Exception as e:
+        # 적용 실패가 기동을 막지 않게 한다 — 미적용 상태는 기존 동작과 동일
+        print(f"DB 마이그레이션 적용 실패: {e}")

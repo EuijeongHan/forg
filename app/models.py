@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Text, Enum
+from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Text, Enum, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 from database import Base
@@ -47,9 +47,14 @@ class Watchlist(Base):
 
 class SeenDisclosure(Base):
     __tablename__ = "seen_disclosures"
+    # 발송 중복 기준은 사용자별(receipt_no, chat_id)이다. receipt_no 단독 unique는
+    # 두 번째 사용자 삽입에서 UniqueViolation → 세션 롤백 → 매 폴링 재발송을 일으킨다.
+    __table_args__ = (
+        UniqueConstraint("receipt_no", "chat_id", name="uq_seen_disclosure_receipt_chat"),
+    )
 
     id = Column(String, primary_key=True, default=gen_uuid)
-    receipt_no = Column(String, unique=True, nullable=False)
+    receipt_no = Column(String, nullable=False, index=True)
     chat_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
     corp_name = Column(String, nullable=False)
     report_nm = Column(String, nullable=False)
