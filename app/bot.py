@@ -227,11 +227,10 @@ async def view_disclosure_callback(update: Update, context: ContextTypes.DEFAULT
     if result.get("resolved"):
         disclosure_cache[receipt_no] = result["resolved"]
 
-    msg = (
-        f"🏢 <b>{result['corp_name']}</b>\n"
-        f"📋 {result['report_nm']}\n\n"
-        f"📝 <b>요약</b>\n{result['summary']}\n\n"
-        f'🔗 <a href="{result["dart_url"]}">원문 보기</a>'
+    # 알림 경로와 동일한 빌더 사용 — HTML 이스케이프 일원화
+    from notifier import build_disclosure_message
+    msg = build_disclosure_message(
+        result["corp_name"], result["report_nm"], receipt_no, result["summary"]
     )
     await query.message.reply_text(msg, parse_mode="HTML")
 

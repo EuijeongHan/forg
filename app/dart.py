@@ -1,9 +1,22 @@
 from config import DART_API_KEY, IMPORTANT_REPORT_TYPES
 import httpx
 import re
+from datetime import datetime
 from html.parser import HTMLParser
+from zoneinfo import ZoneInfo
 
 DART_BASE_URL = "https://opendart.fss.or.kr/api"
+KST = ZoneInfo("Asia/Seoul")
+
+
+def today_kst() -> str:
+    """오늘 날짜(YYYYMMDD)를 KST 기준으로 반환.
+
+    DART의 접수일(rcept_dt)은 KST 날짜다. 컨테이너가 UTC로 돌면
+    naive datetime.now()는 00~09시 KST 사이에 전날을 가리켜
+    아침 공시를 놓치므로 반드시 이 함수를 쓴다.
+    """
+    return datetime.now(KST).strftime("%Y%m%d")
 
 TYPED_APIS = {
     '유상증자': 'piicDecsn',
@@ -50,8 +63,7 @@ def get_api_for_report(report_nm: str) -> str:
 
 
 async def fetch_recent_disclosures() -> list[dict]:
-    from datetime import datetime
-    today = datetime.now().strftime("%Y%m%d")
+    today = today_kst()
     url = f"{DART_BASE_URL}/list.json"
     all_disclosures = []
     page = 1
@@ -115,12 +127,11 @@ async def save_disclosures_to_db(disclosures: list[dict]):
 
 
 async def fetch_today_disclosures_from_db(important_only: bool = False) -> list[dict]:
-    from datetime import datetime
     from database import AsyncSessionLocal
     from models import Disclosure
     from sqlalchemy import select
 
-    today = datetime.now().strftime("%Y%m%d")
+    today = today_kst()
     async with AsyncSessionLocal() as session:
         query = select(Disclosure).where(Disclosure.rcept_dt == today)
         if important_only:

@@ -4,7 +4,8 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-engine = create_async_engine(DATABASE_URL, echo=True)
+# echo=False: 프로덕션 로그 볼륨·정보 노출 방지 (디버깅 시에만 임시로 켠다)
+engine = create_async_engine(DATABASE_URL, echo=False)
 
 AsyncSessionLocal = sessionmaker(
     engine,
