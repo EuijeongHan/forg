@@ -4,6 +4,11 @@ dart/summarizer are imported lazily inside functions to avoid import cycles,
 mirroring the original bot.py handlers.
 """
 
+# 봇 조회 경로의 요약 캐시(rcept_no → 결과 dict) — 같은 공시 버튼을 여러 번 눌러도
+# LLM을 재호출하지 않는다. 프로세스 메모리(§6-4 제약과 동일, 재시작 시 소실 허용).
+_summary_cache: dict[str, dict] = {}
+_SUMMARY_CACHE_MAX = 300
+
 
 def filter_by_keywords(disclosures: list[dict], keywords: list[str]) -> list[dict]:
     """Keep disclosures whose report_nm or corp_name contains any keyword."""
@@ -50,6 +55,10 @@ async def summarize_by_receipt(receipt_no: str, hint: dict | None = None) -> dic
     from dart import fetch_recent_disclosures, fetch_disclosure_detail, fetch_typed_disclosure
     from summarizer import summarize_disclosure, summarize_typed_disclosure
 
+    cached = _summary_cache.get(receipt_no)
+    if cached:
+        return cached
+
     hint = hint or {}
     corp_name = hint.get("corp_name", "")
     report_nm = hint.get("report_nm", "")
@@ -79,10 +88,17 @@ async def summarize_by_receipt(receipt_no: str, hint: dict | None = None) -> dic
         summary = await summarize_disclosure(corp_name, report_nm, content)
 
     dart_url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt_no}"
-    return {
+    result = {
         "corp_name": corp_name,
         "report_nm": report_nm,
         "summary": summary,
         "dart_url": dart_url,
         "resolved": resolved,
     }
+
+    # 실패/한도 폴백 요약은 캐시하지 않는다 — 다음 조회에서 재시도 가능해야 함
+    if summary and "실패했습니다" not in summary and "한도에 도달" not in summary:
+        if len(_summary_cache) >= _SUMMARY_CACHE_MAX:
+            _summary_cache.clear()
+        _summary_cache[receipt_no] = result
+    return result

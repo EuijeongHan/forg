@@ -41,3 +41,6 @@ IMPORTANT_REPORT_TYPES = [
 
 # 폴링 주기 (초)
 POLLING_INTERVAL = 60
+
+# LLM 일일 호출 한도 (비용 가드레일) — 초과 시 요약 생략, 카드/제목만 발송
+LLM_DAILY_CALL_LIMIT = int(os.getenv("LLM_DAILY_CALL_LIMIT", "500"))

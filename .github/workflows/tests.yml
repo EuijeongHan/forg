@@ -23,3 +23,5 @@ jobs:
         run: python tests/test_stage0_hardening.py
       - name: P0 pipeline guards
         run: python tests/test_p0_pipeline_guards.py
+      - name: P1 quick wins
+        run: python tests/test_p1_quickwins.py
