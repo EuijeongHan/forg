@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     print(f"DART 폴링 시작 (주기: {POLLING_INTERVAL}초)")
 
-    await send_system_message(TELEGRAM_CHAT_ID, "✅ foRG 서비스가 시작되었습니다.")
+    await send_system_message(TELEGRAM_CHAT_ID, "✅ forG 서비스가 시작되었습니다.")
 
     yield
 
@@ -54,7 +54,7 @@ async def lifespan(app: FastAPI):
     print("서비스 종료")
 
 
-app = FastAPI(title="foRG", lifespan=lifespan)
+app = FastAPI(title="forG", lifespan=lifespan)
 
 @app.get("/health")
 async def health():
