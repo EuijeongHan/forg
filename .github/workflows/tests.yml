@@ -1,0 +1,25 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  behavioral-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Service-layer smoke
+        run: python tests/test_services_smoke.py
+      - name: Seen dedup + summary regen guard
+        run: python tests/test_seen_dedup.py
+      - name: Stage-0 hardening
+        run: python tests/test_stage0_hardening.py
+      - name: P0 pipeline guards
+        run: python tests/test_p0_pipeline_guards.py

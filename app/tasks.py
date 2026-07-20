@@ -1,23 +1,82 @@
 import uuid
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from sqlalchemy import select
+from config import TELEGRAM_CHAT_ID
 from database import AsyncSessionLocal
 from models import SeenDisclosure, User, Watchlist
 from dart import fetch_recent_disclosures, is_important, fetch_disclosure_detail, fetch_typed_disclosure, fetch_rcept_times, is_after_hours
 from summarizer import summarize_disclosure, summarize_typed_disclosure
-from notifier import send_alert
+from notifier import send_alert, send_system_message
+
+_KST = ZoneInfo("Asia/Seoul")
+
+# 자가 경보 상태 — 단일 프로세스 전제(CLAUDE.md §6-4의 disclosure_cache와 동일 제약).
+# 침묵 사망 방지: 폴링이 조용히 실패/빈손 반복되면 운영자 채팅으로 1회 경보를 보낸다.
+FAIL_ALERT_THRESHOLD = 5     # 연속 실패 N회에 경보
+EMPTY_ALERT_THRESHOLD = 10   # 평일 장중 공시 0건 N사이클 지속에 경보
+_fail_streak = 0
+_fail_alerted = False
+_empty_streak = 0
+_empty_alerted = False
+
+
+def _is_business_hours_kst(now: datetime | None = None) -> bool:
+    """평일 08~19시 KST — 이 시간대에 공시 0건이 지속되면 연동 이상 신호다."""
+    now = now or datetime.now(_KST)
+    return now.weekday() < 5 and 8 <= now.hour < 19
+
+
+async def _notify_operator(text: str):
+    if TELEGRAM_CHAT_ID:
+        await send_system_message(TELEGRAM_CHAT_ID, text)
+
 
 async def process_disclosures():
+    """폴링 엔트리포인트 — 예외를 삼켜 스케줄을 지키되, 연속 실패는 운영자에게 경보"""
+    global _fail_streak, _fail_alerted
+    try:
+        await _run_pipeline()
+    except Exception as e:
+        _fail_streak += 1
+        print(f"공시 폴링 실패 (연속 {_fail_streak}회): {type(e).__name__}: {e}")
+        if _fail_streak >= FAIL_ALERT_THRESHOLD and not _fail_alerted:
+            _fail_alerted = True
+            await _notify_operator(
+                f"⚠️ forG 자가 경보: 공시 폴링 연속 {_fail_streak}회 실패\n"
+                f"{type(e).__name__}: {e}\n로그 확인이 필요합니다."
+            )
+        return
+    _fail_streak = 0
+    _fail_alerted = False
+
+
+async def _run_pipeline():
     """DART 공시 폴링 → DB 저장 → 필터링 → 요약 → 알림 발송"""
     from dart import save_disclosures_to_db, today_kst
+    global _empty_streak, _empty_alerted
     print("공시 폴링 시작...")
 
-    disclosures = await fetch_recent_disclosures()
+    # 자정 경계 누락 방지: 어제~오늘 2일 창으로 조회.
+    # 중복은 save_disclosures_to_db(rcept_no unique)와 SeenDisclosure가 막는다.
+    disclosures = await fetch_recent_disclosures(days=2)
     if not disclosures:
+        if _is_business_hours_kst():
+            _empty_streak += 1
+            if _empty_streak >= EMPTY_ALERT_THRESHOLD and not _empty_alerted:
+                _empty_alerted = True
+                await _notify_operator(
+                    f"⚠️ forG 자가 경보: 평일 장중 공시 0건이 {_empty_streak}사이클 지속 — "
+                    "DART 연동(키·네트워크·응답 형식) 점검이 필요합니다."
+                )
         print("새로운 공시 없음")
         return
+    _empty_streak = 0
+    _empty_alerted = False
 
     await save_disclosures_to_db(disclosures)
 
+    # 접수 시각은 오늘자만 조회 — 전일분 야간경고 뱃지는 놓칠 수 있으나 알림 자체는 발송됨
     rcept_times = await fetch_rcept_times(today_kst())
 
     async with AsyncSessionLocal() as session:

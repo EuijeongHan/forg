@@ -26,7 +26,7 @@ DISCLOSURE = {
     "rcept_no": "20260721000001", "corp_name": "테스트전자",
     "report_nm": "유상증자 결정", "corp_code": "C0001", "rcept_dt": "20260721",
 }
-async def fetch_recent_disclosures(): return [dict(DISCLOSURE)]
+async def fetch_recent_disclosures(days=1): return [dict(DISCLOSURE)]
 async def save_disclosures_to_db(d): pass
 async def fetch_rcept_times(date): return {}
 async def fetch_disclosure_detail(r): return "본문"
@@ -58,6 +58,8 @@ async def send_alert(chat_id, corp_name, report_nm, receipt_no, summary):
     calls["alerts"].append(chat_id)
     return True
 notifier.send_alert = send_alert
+async def send_system_message(chat_id, text): pass
+notifier.send_system_message = send_system_message
 sys.modules["notifier"] = notifier
 
 from sqlalchemy import select, func  # noqa: E402
