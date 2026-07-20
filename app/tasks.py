@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from sqlalchemy import select
+import config
 from config import TELEGRAM_CHAT_ID
 from database import AsyncSessionLocal
 from models import SeenDisclosure, User, Watchlist
@@ -64,6 +65,7 @@ async def _store_typed_snapshot(session, receipt_no: str, typed_data: dict):
     row = result.scalar_one_or_none()
     if row is not None and row.raw_typed_data is None:
         row.raw_typed_data = typed_data
+    return row
 
 
 async def _run_pipeline():
@@ -143,7 +145,10 @@ async def _run_pipeline():
             # 정형 데이터 우선, 없으면 원문 크롤링
             typed_data = await fetch_typed_disclosure(corp_code, receipt_no, report_nm, rcept_dt)
             if typed_data:
-                await _store_typed_snapshot(session, receipt_no, typed_data)
+                disclosure_row = await _store_typed_snapshot(session, receipt_no, typed_data)
+                if config.ENABLE_EVENT_CARDS and disclosure_row is not None:
+                    from services import event_service
+                    await event_service.record_typed_event(session, disclosure_row, report_nm)
                 summary = await summarize_typed_disclosure(corp_name, report_nm, typed_data)
             else:
                 content = await fetch_disclosure_detail(receipt_no)
