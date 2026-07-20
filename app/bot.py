@@ -28,7 +28,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await user_service.ensure_user(chat_id, first_name)
     msg = (
         f"안녕하세요 {first_name}님 👋\n"
-        "foRG에 오신 것을 환영합니다.\n\n"
+        "forG에 오신 것을 환영합니다.\n\n"
         "📌 명령어 안내\n"
         "/add 기업명 - 관심 기업 등록\n"
         "/remove 기업명 - 관심 기업 삭제\n"
