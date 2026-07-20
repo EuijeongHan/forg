@@ -25,3 +25,5 @@ jobs:
         run: python tests/test_p0_pipeline_guards.py
       - name: P1 quick wins
         run: python tests/test_p1_quickwins.py
+      - name: Typed snapshot
+        run: python tests/test_typed_snapshot.py
