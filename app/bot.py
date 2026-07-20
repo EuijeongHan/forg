@@ -37,7 +37,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/mytoday - 내 기업 오늘 공시\n"
         "/keyword - /today 키워드 필터\n"
         "/mykeyword - /mytoday 키워드 필터\n"
-        "/settings - 설정"
+        "/settings - 설정\n\n"
+        "ℹ️ forG는 DART 공시 정보를 요약해 전달하는 참고용 도구입니다.\n"
+        "투자 자문·종목 추천 서비스가 아니며, AI 요약에는 오류·지연이 있을 수 있습니다.\n"
+        "투자 판단 전 반드시 DART 원문을 확인하세요.\n"
+        "📄 이용약관·개인정보처리방침: https://github.com/EuijeongHan/forg/tree/main/docs/legal"
     )
     await update.message.reply_text(msg)
 

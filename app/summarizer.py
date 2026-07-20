@@ -1,7 +1,44 @@
-import anthropic
-from config import ANTHROPIC_API_KEY
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+import config
+
+_KST = ZoneInfo("Asia/Seoul")
+
+# LLM 일일 비용 가드 — 단일 프로세스 전제(§6-4). KST 날짜가 바뀌면 리셋.
+_llm_calls_today = 0
+_llm_count_date = None
+_budget_op_alerted = False
+
+
+def _budget_allows() -> bool:
+    """일일 LLM 호출 예산 확인. 허용 시 카운트 후 True, 초과 시 False."""
+    global _llm_calls_today, _llm_count_date, _budget_op_alerted
+    today = datetime.now(_KST).strftime("%Y%m%d")
+    if today != _llm_count_date:
+        _llm_count_date = today
+        _llm_calls_today = 0
+        _budget_op_alerted = False
+    if _llm_calls_today >= config.LLM_DAILY_CALL_LIMIT:
+        return False
+    _llm_calls_today += 1
+    return True
+
+
+async def _notify_budget_once():
+    """한도 도달을 운영자에게 1회 경보 (다음 날 리셋)."""
+    global _budget_op_alerted
+    if _budget_op_alerted:
+        return
+    _budget_op_alerted = True
+    print(f"LLM 일일 한도({config.LLM_DAILY_CALL_LIMIT}) 도달 — 요약 생략 폴백")
+    if config.TELEGRAM_CHAT_ID:
+        from notifier import send_system_message
+        await send_system_message(
+            config.TELEGRAM_CHAT_ID,
+            f"⚠️ forG: LLM 일일 호출 한도({config.LLM_DAILY_CALL_LIMIT}) 도달 — "
+            "이후 알림은 요약 없이 카드/제목만 발송됩니다. (자정 KST 리셋)",
+        )
 
 SYSTEM_PROMPT = """당신은 20년 경력의 기관 애널리스트입니다.
 공시를 읽을 때 표면적인 내용이 아니라 숨겨진 의도와 리스크를 파악합니다.
@@ -78,6 +115,8 @@ async def summarize_with_openai(prompt):
 async def summarize_with_claude(prompt):
     try:
         import asyncio
+        import anthropic  # 지연 임포트 — 다른 provider와 동일 패턴, 테스트 용이성
+        client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
         # anthropic 0.34.2 동기 클라이언트 — 이벤트 루프 블로킹 방지를 위해 스레드로 오프로드
         message = await asyncio.to_thread(
             client.messages.create,
@@ -105,6 +144,10 @@ async def summarize_with_gemini(prompt):
         return None
 
 async def summarize_disclosure(corp_name: str, report_nm: str, content: str) -> str:
+    if not _budget_allows():
+        await _notify_budget_once()
+        return "오늘 자동 요약 한도에 도달했습니다. DART 원문을 확인해주세요."
+
     prompt = build_prompt(corp_name, report_nm, content)
 
     result = await summarize_with_openai(prompt)
@@ -204,7 +247,12 @@ async def summarize_typed_disclosure(corp_name: str, report_nm: str, data: dict)
     
     if not card:
         return "요약 생성에 실패했습니다. DART에서 직접 확인해주세요."
-    
+
+    # 예산 초과 시 카드(정형 수치)만 발송 — 숫자는 API 필드라 LLM 불필요
+    if not _budget_allows():
+        await _notify_budget_once()
+        return card
+
     # AI로 추가 인사이트 보완
     prompt = chr(10).join([
         f"기업명: {corp_name}",
