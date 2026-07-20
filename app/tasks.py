@@ -51,6 +51,21 @@ async def process_disclosures():
     _fail_alerted = False
 
 
+async def _store_typed_snapshot(session, receipt_no: str, typed_data: dict):
+    """정형 응답 원본을 Disclosure에 1회 저장 (P1-2).
+
+    매일 흘러가는 정형 수치를 보존해 정정 전후 비교(Stage 3)·검증 레이어(Stage 7)·
+    golden set의 재료로 쓴다. 이미 저장된 행은 덮어쓰지 않는다(원본 보존).
+    """
+    from models import Disclosure
+    result = await session.execute(
+        select(Disclosure).where(Disclosure.rcept_no == receipt_no)
+    )
+    row = result.scalar_one_or_none()
+    if row is not None and row.raw_typed_data is None:
+        row.raw_typed_data = typed_data
+
+
 async def _run_pipeline():
     """DART 공시 폴링 → DB 저장 → 필터링 → 요약 → 알림 발송"""
     from dart import save_disclosures_to_db, today_kst
@@ -128,6 +143,7 @@ async def _run_pipeline():
             # 정형 데이터 우선, 없으면 원문 크롤링
             typed_data = await fetch_typed_disclosure(corp_code, receipt_no, report_nm, rcept_dt)
             if typed_data:
+                await _store_typed_snapshot(session, receipt_no, typed_data)
                 summary = await summarize_typed_disclosure(corp_name, report_nm, typed_data)
             else:
                 content = await fetch_disclosure_detail(receipt_no)

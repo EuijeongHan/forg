@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Text, Enum, UniqueConstraint
+from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Text, Enum, UniqueConstraint, JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 from database import Base
@@ -77,4 +77,7 @@ class Disclosure(Base):
     rcept_dt = Column(String, nullable=False, index=True)
     flr_nm = Column(String, nullable=True)
     is_important = Column(Boolean, default=False)
+    # 정형 API 응답 원본 스냅샷 (P1-2) — 정정 비교·검증 레이어·golden set의 미래 재료.
+    # 문서 전문이 아니라 수치 필드 dict만 저장한다(저작권·용량 고려).
+    raw_typed_data = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=now_utc)
