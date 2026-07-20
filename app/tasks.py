@@ -44,6 +44,20 @@ async def process_disclosures():
             if not target_users:
                 continue
 
+            # 미발송 사용자를 먼저 확정한다. 전원 발송 완료된 공시는 요약 생성
+            # (정형 API + LLM 호출) 자체를 건너뛴다 — 이 체크가 요약 뒤에 있으면
+            # 이미 알림이 끝난 공시도 매 폴링(60초)마다 LLM을 재호출하게 된다.
+            result = await session.execute(
+                select(SeenDisclosure.chat_id).where(
+                    SeenDisclosure.receipt_no == receipt_no,
+                    SeenDisclosure.chat_id.in_([u.chat_id for u in target_users]),
+                )
+            )
+            seen_chat_ids = set(result.scalars().all())
+            unseen_users = [u for u in target_users if u.chat_id not in seen_chat_ids]
+            if not unseen_users:
+                continue
+
             # 제출 시간 확인
             rcept_time = rcept_times.get(receipt_no, "")
             after_hours = is_after_hours(rcept_time) if rcept_time else False
@@ -64,16 +78,7 @@ async def process_disclosures():
 
             summary = summary + time_warning
 
-            for user in target_users:
-                result = await session.execute(
-                    select(SeenDisclosure).where(
-                        SeenDisclosure.receipt_no == receipt_no,
-                        SeenDisclosure.chat_id == user.chat_id,
-                    )
-                )
-                if result.scalar_one_or_none():
-                    continue
-
+            for user in unseen_users:
                 await send_alert(
                     chat_id=user.chat_id,
                     corp_name=corp_name,
