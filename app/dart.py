@@ -1,12 +1,17 @@
 from config import DART_API_KEY, IMPORTANT_REPORT_TYPES
 import httpx
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from zoneinfo import ZoneInfo
 
 DART_BASE_URL = "https://opendart.fss.or.kr/api"
 KST = ZoneInfo("Asia/Seoul")
+
+
+def kst_date_str(days_ago: int = 0) -> str:
+    """KST 기준 days_ago일 전 날짜(YYYYMMDD)."""
+    return (datetime.now(KST) - timedelta(days=days_ago)).strftime("%Y%m%d")
 
 
 def today_kst() -> str:
@@ -16,7 +21,7 @@ def today_kst() -> str:
     naive datetime.now()는 00~09시 KST 사이에 전날을 가리켜
     아침 공시를 놓치므로 반드시 이 함수를 쓴다.
     """
-    return datetime.now(KST).strftime("%Y%m%d")
+    return kst_date_str(0)
 
 TYPED_APIS = {
     '유상증자': 'piicDecsn',
@@ -62,8 +67,13 @@ def get_api_for_report(report_nm: str) -> str:
     return None
 
 
-async def fetch_recent_disclosures() -> list[dict]:
-    today = today_kst()
+async def fetch_recent_disclosures(days: int = 1) -> list[dict]:
+    """최근 days일(오늘 포함, KST) 공시 조회.
+
+    폴링 파이프라인은 days=2를 쓴다 — 자정 직전(23:5x) 접수 공시가 날짜가
+    넘어간 뒤 조회창 밖으로 빠져 영구 누락되는 것을 막기 위함.
+    봇 조회(/today, /mytoday)는 기본값 1(오늘만)을 유지한다.
+    """
     url = f"{DART_BASE_URL}/list.json"
     all_disclosures = []
     page = 1
@@ -72,7 +82,8 @@ async def fetch_recent_disclosures() -> list[dict]:
         while True:
             params = {
                 "crtfc_key": DART_API_KEY,
-                "bgn_de": today,
+                "bgn_de": kst_date_str(days - 1),
+                "end_de": today_kst(),
                 "page_no": page,
                 "page_count": 100,
             }
