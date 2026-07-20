@@ -44,3 +44,6 @@ POLLING_INTERVAL = 60
 
 # LLM 일일 호출 한도 (비용 가드레일) — 초과 시 요약 생략, 카드/제목만 발송
 LLM_DAILY_CALL_LIMIT = int(os.getenv("LLM_DAILY_CALL_LIMIT", "500"))
+
+# 이벤트 정규화 저장 (Stage 2 기반) — 기본 OFF. 알림 내용에는 영향 없음(DB 기록만).
+ENABLE_EVENT_CARDS = os.getenv("ENABLE_EVENT_CARDS", "false").lower() == "true"

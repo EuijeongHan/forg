@@ -27,3 +27,5 @@ jobs:
         run: python tests/test_p1_quickwins.py
       - name: Typed snapshot
         run: python tests/test_typed_snapshot.py
+      - name: Events foundation
+        run: python tests/test_events_foundation.py

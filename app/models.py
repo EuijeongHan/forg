@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Text, Enum, UniqueConstraint, JSON
+from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Text, Enum, UniqueConstraint, JSON, Integer
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 from database import Base
@@ -81,3 +81,27 @@ class Disclosure(Base):
     # 문서 전문이 아니라 수치 필드 dict만 저장한다(저작권·용량 고려).
     raw_typed_data = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=now_utc)
+
+
+class DisclosureEvent(Base):
+    """공시가 뜻하는 '사건'의 공통 구조 (Stage 2 기반, 계획서 §3.3).
+
+    Disclosure(제출된 문서)와 분리해 정정 비교·타임라인·검색의 토대가 된다.
+    신규 테이블이므로 create_all이 생성한다(기존 테이블 ALTER 아님 — 마이그레이션 불필요).
+    """
+    __tablename__ = "disclosure_events"
+    __table_args__ = (
+        UniqueConstraint("disclosure_id", name="uq_disclosure_event_disclosure"),
+    )
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    disclosure_id = Column(String, ForeignKey("disclosures.id"), nullable=False, index=True)
+    corp_code = Column(String, nullable=False, index=True)
+    event_type = Column(String, nullable=False, index=True)
+    occurred_on = Column(String, nullable=True)
+    # 정규화 산출물 — 원본(raw)은 Disclosure.raw_typed_data에 있음
+    normalized_data = Column(JSON, nullable=False, default=dict)
+    metrics = Column(JSON, nullable=False, default=dict)
+    normalization_version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime(timezone=True), default=now_utc)
+    updated_at = Column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
