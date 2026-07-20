@@ -1,0 +1,2 @@
+# 테스트 전용 의존성 — 프로덕션 이미지(requirements.txt)에는 포함되지 않는다.
+aiosqlite==0.22.1
