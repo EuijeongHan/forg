@@ -77,7 +77,10 @@ async def summarize_with_openai(prompt):
 
 async def summarize_with_claude(prompt):
     try:
-        message = client.messages.create(
+        import asyncio
+        # anthropic 0.34.2 동기 클라이언트 — 이벤트 루프 블로킹 방지를 위해 스레드로 오프로드
+        message = await asyncio.to_thread(
+            client.messages.create,
             model="claude-sonnet-4-5",
             max_tokens=600,
             system=SYSTEM_PROMPT,
@@ -90,10 +93,12 @@ async def summarize_with_claude(prompt):
 
 async def summarize_with_gemini(prompt):
     try:
+        import asyncio
         import google.generativeai as genai
         genai.configure(api_key=__import__("os").getenv("GEMINI_API_KEY"))
         model = genai.GenerativeModel("gemini-1.5-flash")
-        response = model.generate_content(SYSTEM_PROMPT + chr(10) + prompt)
+        # 동기 SDK — 스레드로 오프로드
+        response = await asyncio.to_thread(model.generate_content, SYSTEM_PROMPT + chr(10) + prompt)
         return response.text
     except Exception as e:
         print("Gemini 요약 실패:", e)
@@ -121,8 +126,9 @@ async def summarize_disclosure(corp_name: str, report_nm: str, content: str) -> 
 
 def format_typed_disclosure(corp_name: str, report_nm: str, data: dict) -> str:
     """정형 데이터를 카드 뷰 형식으로 포맷팅"""
-    from datetime import datetime, date
-    today = date.today()
+    from datetime import datetime
+    from dart import KST
+    today = datetime.now(KST).date()  # D-day는 KST 기준
 
     lines = []
 

@@ -8,8 +8,7 @@ from notifier import send_alert
 
 async def process_disclosures():
     """DART 공시 폴링 → DB 저장 → 필터링 → 요약 → 알림 발송"""
-    from dart import save_disclosures_to_db
-    from datetime import datetime
+    from dart import save_disclosures_to_db, today_kst
     print("공시 폴링 시작...")
 
     disclosures = await fetch_recent_disclosures()
@@ -19,8 +18,7 @@ async def process_disclosures():
 
     await save_disclosures_to_db(disclosures)
 
-    today = datetime.now().strftime("%Y%m%d")
-    rcept_times = await fetch_rcept_times(today)
+    rcept_times = await fetch_rcept_times(today_kst())
 
     async with AsyncSessionLocal() as session:
         for disclosure in disclosures:
@@ -79,13 +77,16 @@ async def process_disclosures():
             summary = summary + time_warning
 
             for user in unseen_users:
-                await send_alert(
+                sent = await send_alert(
                     chat_id=user.chat_id,
                     corp_name=corp_name,
                     report_nm=report_nm,
                     receipt_no=receipt_no,
                     summary=summary,
                 )
+                if not sent:
+                    # 발송 실패 시 기록하지 않는다 → 다음 폴링에서 재시도
+                    continue
 
                 seen = SeenDisclosure(
                     id=str(uuid.uuid4()),
@@ -97,6 +98,8 @@ async def process_disclosures():
                 )
                 session.add(seen)
 
-        await session.commit()
+            # 공시 단위 커밋: 중간 크래시 시에도 이미 발송된 기록이 보존되어
+            # 다음 폴링에서 중복 발송되지 않는다
+            await session.commit()
 
     print("공시 폴링 완료")
