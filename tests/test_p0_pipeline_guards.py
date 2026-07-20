@@ -70,6 +70,10 @@ def check(name, cond):
 
 
 async def main():
+    # 벽시계 의존 제거: 기본은 장외 시간으로 고정 (CI가 KST 장중에 돌면
+    # 첫 호출이 empty 카운터를 올려 P0-3b가 off-by-one으로 깨진다)
+    tasks._is_business_hours_kst = lambda now=None: False
+
     # --- P0-2: 폴링은 2일 창으로 조회 ---
     await process_disclosures()
     check("P0-2: 폴링이 days=2로 조회", state["days_seen"][-1] == 2)
@@ -88,7 +92,6 @@ async def main():
 
     # 회복 → 리셋 → 재발 시 재경보
     state["mode"] = "empty"
-    tasks._is_business_hours_kst = lambda now=None: False  # 빈 결과 경보 간섭 차단
     await process_disclosures()  # 성공(빈손이지만 예외 아님) → 실패 카운터 리셋
     state["mode"] = "raise"
     for _ in range(5):
@@ -97,7 +100,9 @@ async def main():
 
     # --- P0-3b: 평일 장중 공시 0건 지속 경보 (임계 10) ---
     state["mode"] = "empty"
-    await process_disclosures()  # 실패 스트릭 리셋용 성공 1회 (business=False라 empty 카운트 안 됨)
+    await process_disclosures()  # 실패 스트릭 리셋용 성공 1회 (장외 고정이라 empty 미카운트)
+    tasks._empty_streak = 0
+    tasks._empty_alerted = False
     tasks._is_business_hours_kst = lambda now=None: True
     base = len(state["system_msgs"])
     for _ in range(9):
