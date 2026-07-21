@@ -105,3 +105,23 @@ class DisclosureEvent(Base):
     normalization_version = Column(Integer, nullable=False, default=1)
     created_at = Column(DateTime(timezone=True), default=now_utc)
     updated_at = Column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
+class DisclosureRelation(Base):
+    """공시 간 연결 (Stage 3 기반, 계획서 §4.2). 우선 정정본→원본(correction_of).
+
+    from_disclosure_id = 정정본, to_disclosure_id = 원본. confidence는 연결 방법
+    ("rule"=규칙 기반 추정) — 원문 접수번호로 확정하기 전까지 알림에는 '추정 연결' 표기.
+    """
+    __tablename__ = "disclosure_relations"
+    __table_args__ = (
+        UniqueConstraint("from_disclosure_id", "to_disclosure_id", "relation_type",
+                         name="uq_disclosure_relation"),
+    )
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    from_disclosure_id = Column(String, ForeignKey("disclosures.id"), nullable=False, index=True)
+    to_disclosure_id = Column(String, ForeignKey("disclosures.id"), nullable=False, index=True)
+    relation_type = Column(String, nullable=False)  # correction_of
+    confidence = Column(String, nullable=False, default="rule")
+    created_at = Column(DateTime(timezone=True), default=now_utc)
