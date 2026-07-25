@@ -26,9 +26,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     first_name = update.effective_chat.first_name or ""
     await user_service.ensure_user(chat_id, first_name)
+    greeting = f"안녕하세요 {first_name}님 👋" if first_name else "안녕하세요 👋"
     msg = (
-        f"안녕하세요 {first_name}님 👋\n"
-        "forG에 오신 것을 환영합니다.\n\n"
+        f"{greeting}\n"
+        "DART 공시 실시간 알림 서비스 forG입니다.\n\n"
+        "하루 수천 건의 공시 속에서 중요한 것을 놓치지 않도록,\n"
+        "관심 기업의 핵심 공시만 골라 AI 요약과 함께 즉시 보내드립니다.\n\n"
+        "🚀 이렇게 시작하세요\n"
+        "1) /add 삼성전자 — 관심 기업 등록\n"
+        "2) 이후 새 공시가 올라오면 자동으로 알림이 도착합니다\n\n"
         "📌 명령어 안내\n"
         "/add 기업명 - 관심 기업 등록\n"
         "/remove 기업명 - 관심 기업 삭제\n"
@@ -38,7 +44,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/keyword - /today 키워드 필터\n"
         "/mykeyword - /mytoday 키워드 필터\n"
         "/settings - 설정\n\n"
-        "ℹ️ forG는 DART 공시 정보를 요약해 전달하는 참고용 도구입니다.\n"
+        "ℹ️ forG는 DART 공시를 AI로 요약해 전달하는 참고용 도구입니다.\n"
         "투자 자문·종목 추천 서비스가 아니며, AI 요약에는 오류·지연이 있을 수 있습니다.\n"
         "투자 판단 전 반드시 DART 원문을 확인하세요.\n"
         "📄 이용약관·개인정보처리방침: https://github.com/EuijeongHan/forg/tree/main/docs/legal"
