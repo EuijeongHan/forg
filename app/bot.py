@@ -41,13 +41,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/list - 등록된 기업 목록\n"
         "/today - 오늘 중요 공시 전체\n"
         "/mytoday - 내 기업 오늘 공시\n"
-        "/keyword - /today 키워드 필터\n"
-        "/mykeyword - /mytoday 키워드 필터\n"
+        "/keyword - /today 결과 필터 설정 (예: /keyword 전환사채 유상증자)\n"
+        "/mykeyword - /mytoday 결과 필터 설정 (예: /mykeyword 감자 합병)\n"
         "/settings - 설정\n\n"
         "ℹ️ forG는 DART 공시를 AI로 요약해 전달하는 참고용 도구입니다.\n"
         "투자 자문·종목 추천 서비스가 아니며, AI 요약에는 오류·지연이 있을 수 있습니다.\n"
-        "투자 판단 전 반드시 DART 원문을 확인하세요.\n"
-        "📄 이용약관·개인정보처리방침: https://github.com/EuijeongHan/forg/tree/main/docs/legal"
+        "투자 판단 전 반드시 DART 원문을 확인하세요."
     )
     await update.message.reply_text(msg)
 
@@ -255,7 +254,11 @@ async def keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         current = user.today_keywords or "없음"
         await update.message.reply_text(
-            "📌 현재 /today 키워드: " + current + "\n\n설정: /keyword 전환사채 유상증자\n초기화: /keyword 삭제"
+            "📌 /keyword는 /today의 전체 중요 공시를 기업명·공시명으로 필터링합니다.\n"
+            "여러 키워드를 입력하면 하나라도 포함된 공시를 보여드립니다.\n\n"
+            "현재 키워드: " + current
+            + "\n설정 예시: /keyword 전환사채 유상증자"
+            + "\n필터 해제: /keyword 삭제"
         )
         return
 
@@ -280,7 +283,11 @@ async def mykeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         current = user.mytoday_keywords or "없음"
         await update.message.reply_text(
-            "📌 현재 /mytoday 키워드: " + current + "\n\n설정: /mykeyword 감자 합병\n초기화: /mykeyword 삭제"
+            "📌 /mykeyword는 /mytoday의 관심 기업 공시를 기업명·공시명으로 필터링합니다.\n"
+            "여러 키워드를 입력하면 하나라도 포함된 공시를 보여드립니다.\n\n"
+            "현재 키워드: " + current
+            + "\n설정 예시: /mykeyword 감자 합병"
+            + "\n필터 해제: /mykeyword 삭제"
         )
         return
 
