@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from database import init_db
@@ -8,6 +9,8 @@ from tasks import process_disclosures
 from bot import create_bot_app
 from config import POLLING_INTERVAL, TELEGRAM_CHAT_ID
 from notifier import send_system_message
+
+_KST = ZoneInfo("Asia/Seoul")
 
 scheduler = AsyncIOScheduler()
 bot_app = create_bot_app()
@@ -66,6 +69,10 @@ async def lifespan(app: FastAPI):
         seconds=POLLING_INTERVAL,
         id="dart_polling",
         next_run_time=datetime.now(timezone.utc),
+        # 한 사이클이 주기를 넘겨도 폴링이 겹치지 않게 한다. 겹치면 같은 공시를
+        # 두 번 처리하려 들고 DART 호출도 배로 나간다. 밀린 실행은 1회로 합친다.
+        max_instances=1,
+        coalesce=True,
     )
     scheduler.start()
     print(f"DART 폴링 시작 (주기: {POLLING_INTERVAL}초)")
@@ -93,10 +100,31 @@ app = FastAPI(title="forG", lifespan=lifespan)
 
 @app.get("/health")
 async def health():
+    from tasks import poll_status
+
+    # 사이클을 놓치고 있는지: 마지막 폴링이 주기의 3배를 넘겼으면 정체로 본다.
+    stale = False
+    last_run = poll_status.get("last_run_at")
+    if last_run:
+        try:
+            elapsed = (datetime.now(_KST) - datetime.fromisoformat(last_run)).total_seconds()
+            stale = elapsed > POLLING_INTERVAL * 3
+        except ValueError:
+            stale = False
+
+    degraded = (
+        not scheduler.running
+        or stale
+        or poll_status.get("last_result") == "error"
+        or not bot_polling_started
+    )
+
     return {
-        "status": "ok",
+        "status": "degraded" if degraded else "ok",
         "scheduler": scheduler.running,
         "jobs": [job.id for job in scheduler.get_jobs()],
         "bot_polling": bot_polling_started,
+        "polling_stale": stale,
+        "poll": poll_status,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

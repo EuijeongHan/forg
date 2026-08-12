@@ -42,6 +42,13 @@ class Watchlist(Base):
     corp_name = Column(String, nullable=False)
     created_at = Column(DateTime(timezone=True), default=now_utc)
 
+    # 중복 등록 방지는 watchlist_service의 조회에만 의존하고 있었다. 조회~삽입
+    # 사이에 같은 사용자의 요청이 겹치면 중복 행이 생기고, 그 기업 공시는
+    # 알림이 2번 나간다. DB 차원에서 막는다.
+    __table_args__ = (
+        UniqueConstraint("chat_id", "corp_code", name="uq_watchlist_chat_corp"),
+    )
+
     user = relationship("User", back_populates="watchlist")
 
 

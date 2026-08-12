@@ -1,6 +1,7 @@
 """Watchlist business logic (telegram-independent)."""
 import uuid
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from database import AsyncSessionLocal
 from models import Watchlist
 from services.user_service import get_or_create_user
@@ -24,13 +25,20 @@ async def add_watchlist(
             if existing.scalar_one_or_none():
                 skipped.append(corp_name)
                 continue
-            session.add(Watchlist(
-                id=str(uuid.uuid4()),
-                chat_id=chat_id,
-                corp_code=corp_code,
-                corp_name=corp_name,
-            ))
-            added.append(corp_name)
+            # 사전 조회와 삽입 사이에 같은 요청이 겹치면 uq_watchlist_chat_corp에
+            # 걸린다. savepoint로 그 항목만 되돌려 "이미 등록됨"으로 처리한다 —
+            # 세이브포인트가 없으면 경쟁 한 번에 이 배치 전체가 실패한다.
+            try:
+                async with session.begin_nested():
+                    session.add(Watchlist(
+                        id=str(uuid.uuid4()),
+                        chat_id=chat_id,
+                        corp_code=corp_code,
+                        corp_name=corp_name,
+                    ))
+                added.append(corp_name)
+            except IntegrityError:
+                skipped.append(corp_name)
         await session.commit()
     return added, skipped
 

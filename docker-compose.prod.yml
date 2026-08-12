@@ -1,0 +1,49 @@
+# 운영용 compose — 로컬 개발용 docker-compose.yml과 분리한다.
+#
+# 개발용과 다른 점:
+#   - 소스 볼륨 마운트 없음: 이미지에 구운 코드만 실행한다. 마운트가 있으면
+#     작업 중인 파일이 그대로 운영에 반영돼, 편집 중 저장 한 번에 운영이 바뀐다.
+#   - DB 포트를 호스트에 공개하지 않음: 컨테이너 네트워크 안에서만 접근한다.
+#   - 컨테이너 이름 고정: 개발용 스택과 섞이지 않게 한다.
+#
+# 사용:
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#   docker compose -f docker-compose.prod.yml logs -f app
+#
+# 주의: 같은 Telegram 토큰으로 개발용과 운영용을 동시에 띄우면 두 poller가
+# 업데이트를 나눠 가져 명령이 산발적으로 씹힌다. 토큰을 분리하거나, 운영 스택을
+# 띄울 때는 개발 스택을 내린다(docker compose down).
+
+name: forg-prod
+
+services:
+  db:
+    image: postgres:16
+    container_name: forg-prod-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data_prod:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    container_name: forg-prod-app
+    restart: unless-stopped
+    ports:
+      - "8000:8080"
+    env_file:
+      - .env.prod
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data_prod:
