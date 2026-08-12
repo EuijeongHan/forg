@@ -1,5 +1,8 @@
 FROM python:3.11-slim
 
+# 로그를 버퍼링 없이 즉시 내보낸다 — 버퍼에 갇히면 운영 중 장애를 실시간으로 볼 수 없다
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
 COPY requirements.txt .
