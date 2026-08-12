@@ -34,7 +34,8 @@ DART list.json ─(60초 폴링)→ 저장 ─→ 중요공시 선별 ─→ 워
 ```
 
 **스택**: Python 3.11 · FastAPI · APScheduler · SQLAlchemy(async)+asyncpg · PostgreSQL ·
-python-telegram-bot · OpenAI/Anthropic/Gemini(요약 폴백 체인). 배포는 Railway(Docker).
+python-telegram-bot · OpenAI/Anthropic/Gemini(요약 폴백 체인). 배포 대상은 Railway(Docker)이나
+현재는 중단 상태다([상태](#상태) 참조).
 
 모듈 구조와 DART 규약은 [CLAUDE.md](../CLAUDE.md)(개괄)·[SKILL.md](../SKILL.md)(구현 세부) 참조.
 
@@ -73,14 +74,29 @@ PR·main push마다 GitHub Actions가 전체 행동 테스트를 실행한다.
 | [docs/ops/](docs/ops/) | 도커·서버 운영 설명서 |
 | [docs/legal/](docs/legal/) | 이용약관·개인정보처리방침·고지문·법률 쟁점 메모 |
 | [docs/research/](docs/research/) | 사용자 조사 설문(풀/라이트/인터뷰) |
+| [docs/planning/2026-07-27-product-rebuild-plan.md](docs/planning/2026-07-27-product-rebuild-plan.md) | 제품 개편안 (명령 체계·카드·신뢰성 재설계) |
 | [docs/planning/](docs/planning/) | 비판적 검토 기획안 |
 | [docs/verification/](docs/verification/) | 변경별 검증 실행 기록 |
 | GitHub Issues #26 | 통합 로드맵 (운영 기준) |
 
 ## 상태
 
-프로덕션 상시 운영(Railway). 로드맵은 이슈 [#26](https://github.com/EuijeongHan/forg/issues/26) 기준으로
-운영 안정화(Stage 0) 완료, 이벤트 카드·정정 비교 계층을 플래그 뒤에서 선구축 중.
+**현재 상시 운영 중이 아니다.** Railway 배포는 2026-04-22가 마지막이고 2026-05-23에
+`inactive` 처리됐다. 이후 main에 쌓인 커밋은 아직 배포되지 않았으므로, 실제 알림 발송은
+멈춰 있다고 보면 된다. 로컬은 `docker compose up`으로 기동해 확인할 수 있다.
+
+재배포 시 확인할 것:
+
+- `DATABASE_URL`은 Railway PostgreSQL 값이어야 한다. 로컬 `.env`의 `db:5432`는
+  docker compose 내부 호스트명이라 그대로 쓰면 안 된다.
+- 신규 환경변수 `LLM_DAILY_CALL_LIMIT`(기본 500)·`ENABLE_EVENT_CARDS`(기본 false)는
+  선택이다. 미설정이면 기본값으로 동작한다.
+- 기동 로그에 `DB 마이그레이션 적용 완료`·`텔레그램 봇 시작 완료`가 찍히는지 본다.
+  마이그레이션 0001은 사용자별 중복 발송을 막는 수정이라 적용 여부가 중요하다.
+
+로드맵은 이슈 [#26](https://github.com/EuijeongHan/forg/issues/26) 기준으로 운영 안정화(Stage 0)
+완료, 이벤트 카드·정정 비교 계층을 플래그 뒤에서 선구축 중이다. 제품 방향 재정의는
+[제품 개편안](docs/planning/2026-07-27-product-rebuild-plan.md) 참조.
 
 ## 면책
 
