@@ -43,9 +43,18 @@ python-telegram-bot · OpenAI/Anthropic/Gemini(요약 폴백 체인). 배포 대
 
 | 명령 | 설명 |
 |---|---|
-| `/start` | 시작·안내 | `/add 기업명` | 관심기업 등록 | `/remove 기업명` | 삭제 |
-| `/list` | 등록 목록 | `/today` | 오늘 중요 공시 | `/mytoday` | 내 기업 오늘 공시 |
-| `/keyword` `/mykeyword` | 키워드 필터 | `/settings` | 설정 |
+| `/start` | 시작·안내 |
+| `/add 기업명` · `/remove 기업명` · `/list` | 관심기업 등록·삭제·목록 |
+| `/today` | 관심기업의 오늘 중요 공시 |
+| `/today 유상증자` | 위 결과를 검색어로 좁힘 (이번 조회에만 적용, 저장 안 됨) |
+| `/market` · `/market 감사보고서` | 전체 시장의 오늘 중요 공시 |
+| `/help` | 전체 사용법 |
+| `/settings` | 설정 |
+| `/deletedata` | 내 데이터 전체 삭제 (확인 후 즉시 삭제) |
+
+조회 범위(관심기업/전체)와 검색어는 명령에서 바로 드러난다. 저장된 필터가 결과를
+조용히 바꾸지 않는다 — `/keyword`·`/mykeyword`는 이 이유로 폐기됐고, 입력하면 새
+사용법을 안내한다. `/mytoday`는 `/today`의 별칭으로 당분간 유지된다.
 
 ## 로컬 실행
 

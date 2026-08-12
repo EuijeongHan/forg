@@ -34,17 +34,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "관심 기업의 핵심 공시만 골라 AI 요약과 함께 즉시 보내드립니다.\n\n"
         "🚀 이렇게 시작하세요\n"
         "1) /add 삼성전자 — 관심 기업 등록\n"
-        "2) 이후 새 공시가 올라오면 자동으로 알림이 도착합니다\n\n"
-        "📌 명령어 안내\n"
-        "/add 기업명 - 관심 기업 등록\n"
-        "/remove 기업명 - 관심 기업 삭제\n"
+        "2) 이후 새 중요 공시가 올라오면 자동으로 알림이 도착합니다\n\n"
+        "자주 쓰는 명령\n"
+        "/today - 관심기업 오늘 공시 (예: /today 유상증자)\n"
+        "/market - 전체 시장 오늘 공시\n"
         "/list - 등록된 기업 목록\n"
-        "/today - 오늘 중요 공시 전체\n"
-        "/mytoday - 내 기업 오늘 공시\n"
-        "/keyword - 전체 중요 공시 필터 설정\n"
-        "/mykeyword - 관심 기업 공시 필터 설정\n"
-        "/settings - 설정\n"
-        "/deletedata - 내 데이터 전체 삭제\n\n"
+        "/help - 전체 사용법\n\n"
         "ℹ️ forG는 DART 공시를 AI로 요약해 전달하는 참고용 도구입니다.\n"
         "투자 자문·종목 추천 서비스가 아니며, AI 요약에는 오류·지연이 있을 수 있습니다.\n"
         "투자 판단 전 반드시 DART 원문을 확인하세요."
@@ -160,69 +155,83 @@ async def list_corps(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"📋 등록된 기업 목록\n\n{corp_list}")
 
 
+PAGE_SIZE = 20
+
+
 def _disclosure_keyboard(disclosures: list[dict]):
+    # 텔레그램 인라인 키보드 한도와 가독성 때문에 한 번에 PAGE_SIZE건만 보여준다.
+    # 잘린 사실은 호출자가 문구로 알려준다 — 조용히 자르면 사용자는 나머지 공시가
+    # 존재하는지조차 모른다.
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(
             f"{d['corp_name']} | {d['report_nm'][:20]}",
             callback_data=f"view:{d['rcept_no']}"
         )]
-        for d in disclosures[:20]
+        for d in disclosures[:PAGE_SIZE]
     ])
 
 
-async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    await update.message.reply_text("📋 오늘 중요 공시 불러오는 중...")
-
-    important = await disclosure_service.get_today_important()
-    if not important:
-        await update.message.reply_text("오늘 중요 공시가 없습니다.")
+async def _send_query_result(update, result, empty_hint: str = ""):
+    """조회 결과를 표시한다. 빈 결과는 원인을 구분해 안내한다."""
+    if not result.items:
+        if result.filtered_to_empty:
+            await update.message.reply_text(
+                f"'{result.query}'에 해당하는 공시가 없습니다.\n"
+                f"(검색어를 빼면 {result.total_before_query}건)"
+            )
+        else:
+            msg = "오늘 공시가 없습니다."
+            if empty_hint:
+                msg += f"\n{empty_hint}"
+            await update.message.reply_text(msg)
         return
 
-    keywords = await user_service.get_today_keywords(chat_id)
-    if keywords:
-        important = disclosure_service.filter_by_keywords(important, keywords)
-    if not important:
-        await update.message.reply_text("키워드에 해당하는 공시가 없습니다.")
-        return
-
-    for d in important:
+    for d in result.items:
         disclosure_cache[d["rcept_no"]] = d
 
-    kw_txt = f" (키워드: {', '.join(keywords)})" if keywords else ""
-    await update.message.reply_text(
-        f"📋 오늘 중요 공시 ({len(important)}건){kw_txt}\n공시를 선택하면 요약을 보여드립니다.",
-        reply_markup=_disclosure_keyboard(important),
-    )
+    shown = min(len(result.items), PAGE_SIZE)
+    text = result.header() + "\n공시를 선택하면 요약을 보여드립니다."
+    if len(result.items) > PAGE_SIZE:
+        text += f"\n(최근 {shown}건 표시 — 검색어를 붙이면 좁힐 수 있습니다. 예: /today 유상증자)"
+    await update.message.reply_text(text, reply_markup=_disclosure_keyboard(result.items))
 
 
-async def mytoday(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """관심기업의 오늘 중요 공시. 인자를 주면 이번 조회에만 적용되는 검색어."""
     chat_id = str(update.effective_chat.id)
-    await update.message.reply_text("📋 내 기업 오늘 공시 불러오는 중...")
+    query = " ".join(context.args) if context.args else ""
 
     corp_codes = await watchlist_service.get_corp_codes(chat_id)
     if not corp_codes:
-        await update.message.reply_text("등록된 기업이 없습니다.\n/add 기업명으로 등록해주세요.")
+        await update.message.reply_text(
+            "등록된 관심기업이 없습니다.\n"
+            "/add 삼성전자 처럼 기업을 등록하면 오늘 공시를 모아 보여드립니다.\n"
+            "전체 시장을 보려면 /market 을 입력하세요."
+        )
         return
 
-    my_disclosures = await disclosure_service.get_mytoday(corp_codes)
-
-    keywords = await user_service.get_mytoday_keywords(chat_id)
-    if keywords:
-        my_disclosures = disclosure_service.filter_by_keywords(my_disclosures, keywords)
-
-    if not my_disclosures:
-        await update.message.reply_text("내 기업의 오늘 공시가 없습니다.")
-        return
-
-    for d in my_disclosures:
-        disclosure_cache[d["rcept_no"]] = d
-
-    kw_txt = f" (키워드: {', '.join(keywords)})" if keywords else ""
-    await update.message.reply_text(
-        f"📋 내 기업 오늘 공시 ({len(my_disclosures)}건){kw_txt}\n공시를 선택하면 요약을 보여드립니다.",
-        reply_markup=_disclosure_keyboard(my_disclosures),
+    await update.message.reply_text("📋 관심기업 오늘 공시 불러오는 중...")
+    result = await disclosure_service.query_disclosures(
+        scope="watchlist", corp_codes=corp_codes, important_only=True, query=query
     )
+    await _send_query_result(
+        update, result, empty_hint="전체 시장을 보려면 /market 을 입력하세요."
+    )
+
+
+async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """전체 시장의 오늘 중요 공시. 인자를 주면 이번 조회에만 적용되는 검색어."""
+    query = " ".join(context.args) if context.args else ""
+    await update.message.reply_text("📋 전체 시장 오늘 공시 불러오는 중...")
+    result = await disclosure_service.query_disclosures(
+        scope="market", important_only=True, query=query
+    )
+    await _send_query_result(update, result)
+
+
+async def mytoday(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """구 명령 — /today가 관심기업 기준이 되어 역할이 같아졌다. 당분간 별칭으로 둔다."""
+    await today(update, context)
 
 
 async def view_disclosure_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -246,58 +255,57 @@ async def view_disclosure_callback(update: Update, context: ContextTypes.DEFAULT
 
 
 async def keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    user = await user_service.get_user(chat_id)
-    if not user:
-        await update.message.reply_text("먼저 /start 를 입력해주세요.")
-        return
+    """폐기 예정 — 영구 저장 필터는 없앴다. 새 사용법만 안내하고 상태는 바꾸지 않는다.
 
-    if not context.args:
-        current = user.today_keywords or "없음"
-        await update.message.reply_text(
-            "📌 /keyword는 /today의 전체 중요 공시를 기업명·공시명으로 필터링합니다.\n"
-            "여러 키워드를 입력하면 하나라도 포함된 공시를 보여드립니다.\n\n"
-            "현재 키워드: " + current
-            + "\n필터 해제: /keyword 삭제"
-        )
-        return
-
-    if context.args[0] == "삭제":
-        await user_service.clear_today_keywords(chat_id)
-        await update.message.reply_text("✅ /today 키워드가 초기화됐습니다.")
-        return
-
-    kw = ",".join(context.args)
-    synced = await user_service.set_today_keywords(chat_id, kw)
-    sync_txt = " (/mytoday에도 동일 적용)" if synced else ""
-    await update.message.reply_text("✅ /today 키워드 설정: " + kw + sync_txt)
+    저장된 키워드가 조회 결과를 조용히 바꾸는 것이 기존 설계의 핵심 문제였다.
+    이제 검색어는 조회할 때마다 인자로 준다. DB 컬럼은 롤백 여지를 위해 남겨두되
+    더 이상 읽거나 쓰지 않는다.
+    """
+    given = " ".join(context.args) if context.args else "유상증자"
+    await update.message.reply_text(
+        "/keyword 는 더 이상 사용하지 않습니다.\n\n"
+        "이제 검색어를 조회할 때 함께 입력합니다. 저장되지 않으므로 다음 조회에\n"
+        "영향을 주지 않습니다.\n\n"
+        f"전체 시장에서 찾기:  /market {given}\n"
+        f"관심기업에서 찾기:  /today {given}\n\n"
+        "자세한 사용법은 /help"
+    )
 
 
 async def mykeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    user = await user_service.get_user(chat_id)
-    if not user:
-        await update.message.reply_text("먼저 /start 를 입력해주세요.")
-        return
+    """폐기 예정 — keyword와 동일. /today에 인자를 붙이는 방식으로 대체한다."""
+    given = " ".join(context.args) if context.args else "유상증자"
+    await update.message.reply_text(
+        "/mykeyword 는 더 이상 사용하지 않습니다.\n\n"
+        f"관심기업 공시를 검색어로 좁히려면:  /today {given}\n"
+        "검색어는 이번 조회에만 적용되고 저장되지 않습니다.\n\n"
+        "자세한 사용법은 /help"
+    )
 
-    if not context.args:
-        current = user.mytoday_keywords or "없음"
-        await update.message.reply_text(
-            "📌 /mykeyword는 /mytoday의 관심 기업 공시를 기업명·공시명으로 필터링합니다.\n"
-            "여러 키워드를 입력하면 하나라도 포함된 공시를 보여드립니다.\n\n"
-            "현재 키워드: " + current
-            + "\n필터 해제: /mykeyword 삭제"
-        )
-        return
 
-    if context.args[0] == "삭제":
-        await user_service.clear_mytoday_keywords(chat_id)
-        await update.message.reply_text("✅ /mytoday 키워드가 초기화됐습니다.")
-        return
-
-    kw = ",".join(context.args)
-    await user_service.set_mytoday_keywords(chat_id, kw)
-    await update.message.reply_text("✅ /mytoday 키워드 설정: " + kw)
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📖 forG 사용법\n\n"
+        "■ 관심기업\n"
+        "/add 기업명 - 관심기업 등록 (예: /add 삼성전자)\n"
+        "/remove 기업명 - 관심기업 삭제\n"
+        "/list - 등록된 기업 목록\n\n"
+        "■ 공시 조회\n"
+        "/today - 관심기업의 오늘 중요 공시\n"
+        "/today 유상증자 - 위 결과를 검색어로 좁히기\n"
+        "/market - 전체 시장의 오늘 중요 공시\n"
+        "/market 감사보고서 - 위 결과를 검색어로 좁히기\n\n"
+        "검색어는 이번 조회에만 적용되고 저장되지 않습니다.\n\n"
+        "■ 알림\n"
+        "관심기업에 새 중요 공시가 올라오면 자동으로 알림이 갑니다.\n"
+        "따로 설정할 것은 없습니다.\n\n"
+        "■ 기타\n"
+        "/settings - 설정\n"
+        "/deletedata - 내 데이터 전체 삭제\n\n"
+        "ℹ️ forG는 DART 공시를 AI로 요약해 전달하는 참고용 도구입니다.\n"
+        "투자 자문·종목 추천 서비스가 아니며, AI 요약에는 오류·지연이 있을 수 있습니다.\n"
+        "투자 판단 전 반드시 DART 원문을 확인하세요."
+    )
 
 
 def _settings_view(user):
@@ -389,6 +397,8 @@ def create_bot_app() -> Application:
     app.add_handler(CommandHandler("remove", remove))
     app.add_handler(CommandHandler("list", list_corps))
     app.add_handler(CommandHandler("today", today))
+    app.add_handler(CommandHandler("market", market))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("mytoday", mytoday))
     app.add_handler(CommandHandler("keyword", keyword))
     app.add_handler(CommandHandler("mykeyword", mykeyword))
