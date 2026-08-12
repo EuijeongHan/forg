@@ -42,6 +42,76 @@ async def get_mytoday(corp_codes: set[str]) -> list[dict]:
     return [d for d in disclosures if d.get("corp_code") in corp_codes]
 
 
+class QueryResult:
+    """조회 결과와 그 조회가 무엇이었는지를 함께 담는다.
+
+    호출자가 "오늘 공시가 없음"과 "검색어에 걸린 게 없음"을 구분해 안내할 수
+    있어야 한다. 둘을 같은 문구로 보여주면 사용자는 필터 때문에 빈 결과가 나온 건지
+    원래 공시가 없는 건지 알 수 없다.
+    """
+
+    __slots__ = ("items", "scope", "important_only", "query", "total_before_query")
+
+    def __init__(self, items, scope, important_only, query, total_before_query):
+        self.items = items
+        self.scope = scope                      # "watchlist" | "market"
+        self.important_only = important_only
+        self.query = query                      # 이번 조회에만 적용된 검색어(없으면 "")
+        self.total_before_query = total_before_query
+
+    @property
+    def filtered_to_empty(self) -> bool:
+        """공시은 있었는데 검색어 때문에 0건이 된 경우."""
+        return not self.items and self.total_before_query > 0
+
+    def header(self) -> str:
+        scope_label = "관심기업" if self.scope == "watchlist" else "전체 시장"
+        parts = [f"📋 {scope_label} 오늘 공시"]
+        if self.important_only:
+            parts.append("중요")
+        if self.query:
+            parts.append(f"'{self.query}'")
+        return " · ".join(parts) + f" ({len(self.items)}건)"
+
+
+async def query_disclosures(
+    scope: str,
+    corp_codes: set[str] | None = None,
+    important_only: bool = True,
+    query: str = "",
+) -> QueryResult:
+    """조회 경로 단일 진입점 — 범위·중요도·검색어를 인자로만 받는다.
+
+    저장된 키워드를 몰래 적용하지 않는다. 사용자가 모르는 영구 필터 때문에
+    결과가 달라지는 것이 기존 /keyword 설계의 핵심 문제였다(개편안 §2.1).
+    """
+    from dart import (
+        fetch_today_disclosures_from_db,
+        fetch_recent_disclosures,
+        save_disclosures_to_db,
+        is_important,
+    )
+
+    if scope == "watchlist":
+        disclosures = await fetch_recent_disclosures()
+        codes = corp_codes or set()
+        items = [d for d in disclosures if d.get("corp_code") in codes]
+        if important_only:
+            items = [d for d in items if is_important(d.get("report_nm", ""))]
+    else:
+        items = await fetch_today_disclosures_from_db(important_only=important_only)
+        if not items:
+            disclosures = await fetch_recent_disclosures()
+            await save_disclosures_to_db(disclosures)
+            items = await fetch_today_disclosures_from_db(important_only=important_only)
+
+    total_before_query = len(items)
+    if query:
+        items = filter_by_keywords(items, [query])
+
+    return QueryResult(items, scope, important_only, query, total_before_query)
+
+
 async def summarize_by_receipt(receipt_no: str, hint: dict | None = None) -> dict:
     """Summarize a disclosure by receipt number.
 
