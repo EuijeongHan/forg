@@ -29,3 +29,61 @@ jobs:
         run: python tests/test_typed_snapshot.py
       - name: Events foundation
         run: python tests/test_events_foundation.py
+      - name: Correction foundation
+        run: python tests/test_correction_foundation.py
+      - name: Verification foundation
+        run: python tests/test_verification_foundation.py
+      - name: Phase 0 reliability (poll status, per-item isolation, data deletion)
+        run: python tests/test_phase0_reliability.py
+
+  # 마이그레이션은 PostgreSQL 전용 DO 블록이라 SQLite 기반 행위 테스트로는 검증되지
+  # 않는다. 실제 PostgreSQL에 올려 적용 가능 여부와 멱등성(두 번 실행)을 확인한다.
+  migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: forg
+          POSTGRES_PASSWORD: forg1234
+          POSTGRES_DB: forg
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U forg -d forg"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+asyncpg://forg:forg1234@localhost:5432/forg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      # 프로덕션 기동과 동일 경로: create_all로 스키마를 만든 뒤 alembic을 얹는다.
+      # alembic만 단독 실행하면 마이그레이션의 to_regclass 가드가 빈 DB에서 즉시
+      # RETURN 하므로 실제 기동을 재현하지 못한다.
+      # models를 먼저 임포트해야 Base.metadata에 테이블이 등록된다. 임포트를 빠뜨리면
+      # create_all이 아무것도 만들지 않고, 마이그레이션의 to_regclass 가드가 전부
+      # 조기 RETURN 해서 "성공했지만 제약은 없는" 상태가 된다.
+      - name: Initialize schema (create_all + alembic), as the app does
+        working-directory: app
+        run: python -c "import asyncio, models; from database import init_db; asyncio.run(init_db())"
+      - name: Re-apply (idempotency)
+        working-directory: app
+        run: alembic upgrade head
+      - name: Assert constraints exist
+        run: |
+          PGPASSWORD=forg1234 psql -h localhost -U forg -d forg -v ON_ERROR_STOP=1 -c "
+            DO \$\$
+            BEGIN
+              IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='uq_seen_disclosure_receipt_chat') THEN
+                RAISE EXCEPTION 'missing uq_seen_disclosure_receipt_chat';
+              END IF;
+              IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='uq_watchlist_chat_corp') THEN
+                RAISE EXCEPTION 'missing uq_watchlist_chat_corp';
+              END IF;
+            END \$\$;"

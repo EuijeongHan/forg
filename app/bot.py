@@ -43,7 +43,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/mytoday - 내 기업 오늘 공시\n"
         "/keyword - 전체 중요 공시 필터 설정\n"
         "/mykeyword - 관심 기업 공시 필터 설정\n"
-        "/settings - 설정\n\n"
+        "/settings - 설정\n"
+        "/deletedata - 내 데이터 전체 삭제\n\n"
         "ℹ️ forG는 DART 공시를 AI로 요약해 전달하는 참고용 도구입니다.\n"
         "투자 자문·종목 추천 서비스가 아니며, AI 요약에는 오류·지연이 있을 수 있습니다.\n"
         "투자 판단 전 반드시 DART 원문을 확인하세요."
@@ -339,6 +340,48 @@ async def toggle_sync_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text(text, reply_markup=keyboard)
 
 
+async def deletedata(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """개인정보처리방침이 안내한 삭제 요청 경로. 되돌릴 수 없으므로 확인을 받는다."""
+    chat_id = str(update.effective_chat.id)
+    user = await user_service.get_user(chat_id)
+    if not user:
+        await update.message.reply_text("삭제할 데이터가 없습니다.")
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑 모두 삭제", callback_data="confirm_delete")],
+        [InlineKeyboardButton("취소", callback_data="cancel_delete")],
+    ])
+    await update.message.reply_text(
+        "내 데이터를 모두 삭제합니다.\n\n"
+        "삭제 대상: 관심기업 목록, 알림 발송 기록, 계정 정보\n"
+        "삭제하면 알림이 중단되고 되돌릴 수 없습니다. 다시 쓰려면 /start 로 처음부터 등록해야 합니다.",
+        reply_markup=keyboard,
+    )
+
+
+async def confirm_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = str(query.from_user.id)
+
+    counts = await user_service.delete_user_data(chat_id)
+    # disclosure_cache는 rcept_no 기준 공용 캐시라 개인정보가 아니다(공시 원문).
+    # 사용자별 UI 상태만 정리한다.
+    pending_selections.pop(chat_id, None)
+    await query.edit_message_text(
+        "삭제를 완료했습니다.\n"
+        f"관심기업 {counts['watchlist']}건, 발송 기록 {counts['seen']}건, 계정 {counts['user']}건\n\n"
+        "다시 이용하시려면 /start 를 입력해주세요."
+    )
+
+
+async def cancel_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("삭제를 취소했습니다. 데이터는 그대로 유지됩니다.")
+
+
 def create_bot_app() -> Application:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -350,6 +393,9 @@ def create_bot_app() -> Application:
     app.add_handler(CommandHandler("keyword", keyword))
     app.add_handler(CommandHandler("mykeyword", mykeyword))
     app.add_handler(CommandHandler("settings", settings))
+    app.add_handler(CommandHandler("deletedata", deletedata))
+    app.add_handler(CallbackQueryHandler(confirm_delete_callback, pattern="^confirm_delete$"))
+    app.add_handler(CallbackQueryHandler(cancel_delete_callback, pattern="^cancel_delete$"))
     app.add_handler(CallbackQueryHandler(toggle_callback, pattern="^toggle:"))
     app.add_handler(CallbackQueryHandler(confirm_add_callback, pattern="^confirm_add$"))
     app.add_handler(CallbackQueryHandler(remove_callback, pattern="^remove:"))
