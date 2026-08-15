@@ -50,8 +50,8 @@ for f in (fetch_recent_disclosures, save_disclosures_to_db, fetch_today_disclosu
 sys.modules["dart"] = dart_stub
 
 summ = types.ModuleType("summarizer")
-async def summarize_disclosure(c, n, content): return "요약"
-async def summarize_typed_disclosure(c, n, d): return "카드"
+async def summarize_disclosure(c, n, content, bypass_budget=False): return "요약"
+async def summarize_typed_disclosure(c, n, d, bypass_budget=False): return "카드"
 summ.summarize_disclosure = summarize_disclosure
 summ.summarize_typed_disclosure = summarize_typed_disclosure
 sys.modules["summarizer"] = summ

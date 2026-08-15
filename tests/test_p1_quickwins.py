@@ -78,10 +78,10 @@ async def part2_cache():
     sys.modules["dart"] = dart_stub
 
     summ_stub = types.ModuleType("summarizer")
-    async def summarize_typed_disclosure(c, n, d):
+    async def summarize_typed_disclosure(c, n, d, bypass_budget=False):
         gen_calls["n"] += 1
         return "카드요약"
-    async def summarize_disclosure(c, n, content):
+    async def summarize_disclosure(c, n, content, bypass_budget=False):
         gen_calls["n"] += 1
         return "요약"
     summ_stub.summarize_typed_disclosure = summarize_typed_disclosure

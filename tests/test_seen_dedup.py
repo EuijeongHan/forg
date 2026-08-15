@@ -43,10 +43,10 @@ for f in (fetch_recent_disclosures, save_disclosures_to_db, fetch_rcept_times,
 sys.modules["dart"] = dart
 
 summarizer = types.ModuleType("summarizer")
-async def summarize_disclosure(c, n, content):
+async def summarize_disclosure(c, n, content, bypass_budget=False):
     calls["summarize"] += 1
     return "요약본"
-async def summarize_typed_disclosure(c, n, d):
+async def summarize_typed_disclosure(c, n, d, bypass_budget=False):
     calls["summarize"] += 1
     return "카드"
 summarizer.summarize_disclosure = summarize_disclosure
@@ -54,7 +54,7 @@ summarizer.summarize_typed_disclosure = summarize_typed_disclosure
 sys.modules["summarizer"] = summarizer
 
 notifier = types.ModuleType("notifier")
-async def send_alert(chat_id, corp_name, report_nm, receipt_no, summary):
+async def send_alert(chat_id, corp_name, report_nm, receipt_no, summary, tier="important"):
     calls["alerts"].append(chat_id)
     return True
 notifier.send_alert = send_alert

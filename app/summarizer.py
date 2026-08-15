@@ -143,8 +143,12 @@ async def summarize_with_gemini(prompt):
         print("Gemini 요약 실패:", e)
         return None
 
-async def summarize_disclosure(corp_name: str, report_nm: str, content: str) -> str:
-    if not _budget_allows():
+async def summarize_disclosure(
+    corp_name: str, report_nm: str, content: str, bypass_budget: bool = False
+) -> str:
+    # bypass_budget: 긴급 등급(상장폐지·회생 등) 전용. 중대 사건이 하필 한도
+    # 소진 시점에 터졌을 때 요약이 빠지는 상황을 막는다. 호출은 카운트한다.
+    if not _budget_allows() and not bypass_budget:
         await _notify_budget_once()
         return "오늘 자동 요약 한도에 도달했습니다. DART 원문을 확인해주세요."
 
@@ -241,15 +245,18 @@ def format_typed_disclosure(corp_name: str, report_nm: str, data: dict) -> str:
     return chr(10).join(lines)
 
 
-async def summarize_typed_disclosure(corp_name: str, report_nm: str, data: dict) -> str:
+async def summarize_typed_disclosure(
+    corp_name: str, report_nm: str, data: dict, bypass_budget: bool = False
+) -> str:
     """정형 데이터 기반 요약 - 카드 뷰 우선, AI 보완"""
     card = format_typed_disclosure(corp_name, report_nm, data)
-    
+
     if not card:
         return "요약 생성에 실패했습니다. DART에서 직접 확인해주세요."
 
     # 예산 초과 시 카드(정형 수치)만 발송 — 숫자는 API 필드라 LLM 불필요
-    if not _budget_allows():
+    # bypass_budget은 긴급 등급 전용(summarize_disclosure와 동일 이유)
+    if not _budget_allows() and not bypass_budget:
         await _notify_budget_once()
         return card
 
