@@ -9,6 +9,7 @@ from models import SeenDisclosure, User, Watchlist
 from dart import fetch_recent_disclosures, is_important, fetch_disclosure_detail, fetch_typed_disclosure, fetch_rcept_times, is_after_hours
 from summarizer import summarize_disclosure, summarize_typed_disclosure
 from notifier import send_alert, send_system_message
+from alert_tiers import classify_market_tier, sort_key
 
 _KST = ZoneInfo("Asia/Seoul")
 
@@ -130,6 +131,10 @@ async def _run_pipeline():
     alert_count = 0
     failed_receipts: list[str] = []
 
+    # 긴급 등급을 사이클 맨 앞으로 — 공시가 몰린 사이클에서도 중대 사건이
+    # 일반 공시 처리 뒤에서 대기하지 않는다.
+    disclosures = sorted(disclosures, key=sort_key)
+
     async with AsyncSessionLocal() as session:
         for disclosure in disclosures:
             receipt_no = disclosure.get("rcept_no")
@@ -138,20 +143,30 @@ async def _run_pipeline():
             corp_code = disclosure.get("corp_code", "")
             rcept_dt = disclosure.get("rcept_dt", "")
 
-            if not is_important(report_nm):
-                continue
+            # 등급 판정 — 시장 등급(urgent/notice)은 워치리스트 무관 발송,
+            # important는 워치리스트 한정, 둘 다 아니면 참고(일일 다이제스트).
+            market_tier = classify_market_tier(report_nm, disclosure.get("corp_cls"))
+            if not market_tier and not is_important(report_nm):
+                continue  # 참고 등급 — 버리는 게 아니라 send_daily_digest가 묶는다
 
             # 공시 한 건의 실패가 사이클 전체를 중단시키지 않게 격리한다.
             # 격리가 없으면 특정 공시(응답 형식 이상 등) 하나 때문에 뒤에 오는
             # 모든 공시가 영구히 발송되지 않는다 — 누락 0을 목표로 하는 서비스에서
             # 가장 조용하고 위험한 실패다.
             try:
-                result = await session.execute(
-                    select(User).join(Watchlist).where(
-                        Watchlist.corp_code == corp_code,
-                        User.is_active == True,
+                if market_tier:
+                    # 시장 전체 등급: 모든 활성 사용자에게 발송 (기본 ON).
+                    # 안전망 기능을 옵트인으로 두지 않는다 — 2026-08-16 결정.
+                    result = await session.execute(
+                        select(User).where(User.is_active == True)
                     )
-                )
+                else:
+                    result = await session.execute(
+                        select(User).join(Watchlist).where(
+                            Watchlist.corp_code == corp_code,
+                            User.is_active == True,
+                        )
+                    )
                 target_users = result.scalars().all()
 
                 if not target_users:
@@ -181,17 +196,24 @@ async def _run_pipeline():
                 if is_audit and after_hours:
                     time_warning = f"\n\n⚠️ 야간 제출 감지 ({rcept_time}) - 주의 필요"
 
-                # 정형 데이터 우선, 없으면 원문 크롤링
+                # 정형 데이터 우선, 없으면 원문 크롤링.
+                # 긴급 등급은 LLM 일일 한도를 우회한다 — 중대 사건이 하필 한도
+                # 소진 시점에 터졌을 때 요약이 빠지는 상황을 막는다.
+                bypass = market_tier == "urgent"
                 typed_data = await fetch_typed_disclosure(corp_code, receipt_no, report_nm, rcept_dt)
                 if typed_data:
                     disclosure_row = await _store_typed_snapshot(session, receipt_no, typed_data)
                     if config.ENABLE_EVENT_CARDS and disclosure_row is not None:
                         from services import event_service
                         await event_service.record_typed_event(session, disclosure_row, report_nm)
-                    summary = await summarize_typed_disclosure(corp_name, report_nm, typed_data)
+                    summary = await summarize_typed_disclosure(
+                        corp_name, report_nm, typed_data, bypass_budget=bypass
+                    )
                 else:
                     content = await fetch_disclosure_detail(receipt_no)
-                    summary = await summarize_disclosure(corp_name, report_nm, content)
+                    summary = await summarize_disclosure(
+                        corp_name, report_nm, content, bypass_budget=bypass
+                    )
 
                 summary = summary + time_warning
 
@@ -202,6 +224,7 @@ async def _run_pipeline():
                         report_nm=report_nm,
                         receipt_no=receipt_no,
                         summary=summary,
+                        tier=market_tier or "important",
                     )
                     if not sent:
                         # 발송 실패 시 기록하지 않는다 → 다음 폴링에서 재시도
@@ -236,3 +259,102 @@ async def _run_pipeline():
     else:
         poll_status["last_result"] = "success"
         print(f"공시 폴링 완료 (발송 {alert_count}건)")
+
+
+DIGEST_MAX_LINES = 30
+
+
+async def send_daily_digest():
+    """참고 등급 공시를 하루 1회 묶어 보낸다 (18:30 KST 스케줄).
+
+    원칙 1(워치리스트 공시는 버리지 않는다)의 나머지 절반이다. 즉시 알림
+    대상이 아닌 공시(정기보고서·IR·주총 등)도 관심기업 것이면 하루 한 번
+    목록으로 도달한다.
+
+    중복 방지는 즉시 알림과 같은 SeenDisclosure(receipt_no, chat_id)를 쓴다.
+    조회 창은 최근 2일 — 어제 다이제스트 이후 제출분이 오늘 창에 걸리고,
+    이미 보낸 것은 SeenDisclosure가 걸러 이중 발송이 없다.
+    """
+    # 지연 임포트 — 기존 테스트 스텁들이 notifier의 기본 함수만 제공하므로
+    # (disclosure_service의 dart 지연 임포트와 같은 관례)
+    from dart import today_kst, kst_date_str
+    from models import Disclosure
+    from notifier import send_html_message, escape_html
+
+    poll_status["last_digest_at"] = _now_kst_iso()
+    window = [today_kst(), kst_date_str(1)]
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(User).where(User.is_active == True))
+        users = result.scalars().all()
+
+        for user in users:
+            try:
+                result = await session.execute(
+                    select(Watchlist.corp_code).where(Watchlist.chat_id == user.chat_id)
+                )
+                corp_codes = set(result.scalars().all())
+                if not corp_codes:
+                    continue
+
+                result = await session.execute(
+                    select(Disclosure).where(
+                        Disclosure.corp_code.in_(corp_codes),
+                        Disclosure.rcept_dt.in_(window),
+                    ).order_by(Disclosure.rcept_dt.desc())
+                )
+                rows = result.scalars().all()
+
+                # 참고 등급만: 즉시 알림 경로(시장 등급·important)에 해당하면 제외
+                reference = [
+                    r for r in rows
+                    if not is_important(r.report_nm)
+                    and classify_market_tier(r.report_nm, r.corp_cls) is None
+                ]
+                if not reference:
+                    continue
+
+                result = await session.execute(
+                    select(SeenDisclosure.receipt_no).where(
+                        SeenDisclosure.chat_id == user.chat_id,
+                        SeenDisclosure.receipt_no.in_([r.rcept_no for r in reference]),
+                    )
+                )
+                seen = set(result.scalars().all())
+                pending = [r for r in reference if r.rcept_no not in seen]
+                if not pending:
+                    continue
+
+                shown = pending[:DIGEST_MAX_LINES]
+                lines = [
+                    f"· <b>{escape_html(r.corp_name)}</b> {escape_html(r.report_nm)} "
+                    f'<a href="https://dart.fss.or.kr/dsaf001/main.do?rcpNo={r.rcept_no}">원문</a>'
+                    for r in shown
+                ]
+                header = (
+                    f"📄 <b>관심기업 참고 공시</b> ({len(pending)}건)\n"
+                    "즉시 알림 대상이 아닌 공시를 하루 1회 묶어 보내드립니다.\n\n"
+                )
+                tail = (
+                    f"\n\n외 {len(pending) - len(shown)}건은 내일 다이제스트 또는 DART에서 확인해주세요."
+                    if len(pending) > len(shown) else ""
+                )
+
+                sent = await send_html_message(user.chat_id, header + "\n".join(lines) + tail)
+                if not sent:
+                    continue  # 기록하지 않는다 → 내일 창에서 재시도
+
+                for r in shown:
+                    session.add(SeenDisclosure(
+                        id=str(uuid.uuid4()),
+                        receipt_no=r.rcept_no,
+                        chat_id=user.chat_id,
+                        corp_name=r.corp_name,
+                        report_nm=r.report_nm,
+                        summary="[다이제스트]",
+                    ))
+                await session.commit()
+                print(f"다이제스트 발송: chat={user.chat_id} {len(shown)}건 (대기 {len(pending)}건)")
+            except Exception as e:
+                await session.rollback()
+                print(f"다이제스트 실패 (chat={user.chat_id}): {type(e).__name__}: {e}")

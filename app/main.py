@@ -3,9 +3,10 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI
 from database import init_db
-from tasks import process_disclosures
+from tasks import process_disclosures, send_daily_digest
 from bot import create_bot_app
 from config import POLLING_INTERVAL, TELEGRAM_CHAT_ID
 from notifier import send_system_message
@@ -74,8 +75,17 @@ async def lifespan(app: FastAPI):
         max_instances=1,
         coalesce=True,
     )
+    # 참고 등급 다이제스트 — 즉시 알림 대상이 아닌 관심기업 공시를 하루 1회 묶음.
+    # 18:30 KST: 장 마감(15:30) 후 당일 공시가 대부분 접수된 시점.
+    scheduler.add_job(
+        send_daily_digest,
+        CronTrigger(hour=18, minute=30, timezone=_KST),
+        id="daily_digest",
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.start()
-    print(f"DART 폴링 시작 (주기: {POLLING_INTERVAL}초)")
+    print(f"DART 폴링 시작 (주기: {POLLING_INTERVAL}초) + 다이제스트 18:30 KST")
 
     startup_notice = "✅ forG 서비스가 시작되었습니다."
     if not bot_polling_started:
