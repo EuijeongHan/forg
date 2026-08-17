@@ -7,7 +7,7 @@ moving them to shared storage is a later SaaS-transition task).
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from config import TELEGRAM_BOT_TOKEN
-from services import corp_service, disclosure_service, user_service, watchlist_service
+from services import corp_service, disclosure_service, query_service, user_service, watchlist_service
 
 pending_selections: dict[str, dict[str, str]] = {}
 disclosure_cache: dict[str, dict] = {}
@@ -39,6 +39,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "자주 쓰는 명령\n"
         "/today - 관심기업 오늘 공시 (예: /today 유상증자)\n"
         "/market - 전체 시장 오늘 공시\n"
+        "/ask 질문 - 자연어 공시 검색 (베타)\n"
         "/list - 등록된 기업 목록\n"
         "/help - 전체 사용법\n\n"
         "ℹ️ forG는 DART 공시를 AI로 요약해 전달하는 참고용 도구입니다.\n"
@@ -297,6 +298,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/market - 전체 시장의 오늘 중요 공시\n"
         "/market 감사보고서 - 위 결과를 검색어로 좁히기\n\n"
         "검색어는 이번 조회에만 적용되고 저장되지 않습니다.\n\n"
+        "■ 질문하기 (베타)\n"
+        "/ask 씨젠 최근 1년 CB 공시 찾아줘 - 자연어로 공시 검색\n"
+        "후속 질문은 30분간 문맥이 이어집니다. 초기화: /ask 초기화\n"
+        "답변에는 항상 DART 원문 링크가 붙습니다.\n\n"
         "■ 알림 (자동, 설정 불필요)\n"
         "🚨 긴급 - 상장폐지·회생절차·부도·횡령배임은 관심기업이 아니어도 즉시 알림\n"
         "⚠️ 중요 - 관심기업의 증자·CB·실적·5%지분·내부자매매·배당 등 즉시 알림\n"
@@ -350,6 +355,43 @@ async def toggle_sync_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text(text, reply_markup=keyboard)
 
 
+ASK_MAX_REPLY = 4000  # 텔레그램 한도 내 (notifier.MAX_MESSAGE_LENGTH와 동일 기준)
+
+
+async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """자연어 공시 질의 (Stage 8). 후속 질문은 30분간 문맥이 이어진다."""
+    chat_id = str(update.effective_chat.id)
+    question = " ".join(context.args) if context.args else ""
+
+    if not question:
+        await update.message.reply_text(
+            "질문을 함께 입력해주세요.\n"
+            "예) /ask 씨젠 최근 1년 자기주식 공시 찾아줘\n"
+            "예) /ask 그중 처분 금액이 얼마야?  (후속 질문은 문맥이 이어집니다)\n"
+            "대화 초기화: /ask 초기화"
+        )
+        return
+
+    if question.strip() in ("초기화", "리셋", "reset"):
+        query_service.reset_session(chat_id)
+        await update.message.reply_text("대화를 초기화했습니다. 새 질문을 해주세요.")
+        return
+
+    await update.message.reply_text("🔎 공시를 검색하는 중...")
+    try:
+        answer = await query_service.answer_query(chat_id, question)
+    except Exception as e:
+        print(f"/ask 처리 실패 (chat={chat_id}): {type(e).__name__}: {e}")
+        await update.message.reply_text(
+            "검색 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+        )
+        return
+
+    if len(answer) > ASK_MAX_REPLY:
+        answer = answer[:ASK_MAX_REPLY] + "\n\n... (내용이 잘렸습니다)"
+    await update.message.reply_text(answer, disable_web_page_preview=True)
+
+
 async def deletedata(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """개인정보처리방침이 안내한 삭제 요청 경로. 되돌릴 수 없으므로 확인을 받는다."""
     chat_id = str(update.effective_chat.id)
@@ -401,6 +443,7 @@ def create_bot_app() -> Application:
     app.add_handler(CommandHandler("today", today))
     app.add_handler(CommandHandler("market", market))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("ask", ask))
     app.add_handler(CommandHandler("mytoday", mytoday))
     app.add_handler(CommandHandler("keyword", keyword))
     app.add_handler(CommandHandler("mykeyword", mykeyword))

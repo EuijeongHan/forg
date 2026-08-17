@@ -240,3 +240,50 @@ def is_after_hours(time_str: str) -> bool:
         return hour >= 18
     except:
         return False
+
+
+async def fetch_corp_disclosures(
+    corp_code: str, bgn_de: str, end_de: str, max_pages: int = 10
+) -> list[dict]:
+    """특정 기업의 기간 내 공시 목록 (Stage 8 질의 축).
+
+    list.json은 corp_code를 주면 수년 범위 조회가 가능하다 — 폴링(오늘 전체)과
+    달리 과거 검색(pull)용. status는 §4.1 규약: "000" 정상, "013"은 결과 없음
+    (에러 아님, 빈 리스트).
+    """
+    url = f"{DART_BASE_URL}/list.json"
+    out: list[dict] = []
+    page = 1
+
+    async with httpx.AsyncClient() as client:
+        while page <= max_pages:
+            params = {
+                "crtfc_key": DART_API_KEY,
+                "corp_code": corp_code,
+                "bgn_de": bgn_de,
+                "end_de": end_de,
+                "page_no": page,
+                "page_count": 100,
+            }
+            try:
+                response = await client.get(url, params=params, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+                status = data.get("status")
+                if status == "013":
+                    break
+                if status != "000":
+                    print(f"기업 공시 조회 실패 (status={status}): {data.get('message', '')}")
+                    break
+                items = data.get("list", [])
+                if not items:
+                    break
+                out.extend(items)
+                if page >= int(data.get("total_page", 1)):
+                    break
+                page += 1
+            except Exception as e:
+                print(f"기업 공시 조회 오류: {e}")
+                break
+
+    return out
