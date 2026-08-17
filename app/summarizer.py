@@ -171,11 +171,17 @@ async def summarize_disclosure(
 
     return "요약 생성에 실패했습니다. DART에서 직접 확인해주세요."
 
-def format_typed_disclosure(corp_name: str, report_nm: str, data: dict) -> str:
-    """정형 데이터를 카드 뷰 형식으로 포맷팅"""
+def format_typed_disclosure(corp_name: str, report_nm: str, data: dict, today=None) -> str:
+    """정형 데이터를 카드 뷰 형식으로 포맷팅.
+
+    필드명은 실제 DART 응답으로 검증한다(§10 — 추측 금지). 2026-08-18 평가에서
+    합병(mgptncmp_cmpnm/mgsc_mgdt)·유상증자(ic_mthn)·자기주식 처분(dppln_*)이
+    잘못된/누락된 키로 조회돼 카드가 비었고, LLM이 그 공백을 '미제공'이라고
+    서술하는 결함이 확인됐다. today는 테스트에서 고정할 수 있게 주입 가능.
+    """
     from datetime import datetime
     from dart import KST
-    today = datetime.now(KST).date()  # D-day는 KST 기준
+    today = today or datetime.now(KST).date()  # D-day는 KST 기준
 
     lines = []
 
@@ -190,12 +196,16 @@ def format_typed_disclosure(corp_name: str, report_nm: str, data: dict) -> str:
         if data.get('cvrqpd_bgd'):
             bgd = data['cvrqpd_bgd']
             lines.append(f"• 전환청구 가능일: {bgd}")
-            # D-Day 계산
+            # D-day는 코드가 결정론적으로 계산한다(LLM 파생 금지).
+            # 미래는 D-n(남은 일수), 당일은 D-Day, 지난 날짜는 카운트다운 생략.
             try:
                 d = datetime.strptime(bgd.replace('년 ', '-').replace('월 ', '-').replace('일', '').strip(), '%Y-%m-%d').date()
                 diff = (d - today).days
-                lines.append(f"• ⏰ 전환청구까지 D+{diff}일")
-            except:
+                if diff > 0:
+                    lines.append(f"• ⏰ 전환청구 개시까지 D-{diff}")
+                elif diff == 0:
+                    lines.append("• ⏰ 전환청구 개시일 (D-Day)")
+            except Exception:
                 pass
         if data.get('fdpp_op') and data['fdpp_op'] != '-': lines.append(f"• 자금목적(운영): {data['fdpp_op']}원")
         if data.get('fdpp_dtrp') and data['fdpp_dtrp'] != '-': lines.append(f"• 자금목적(채무상환): {data['fdpp_dtrp']}원")
@@ -203,11 +213,19 @@ def format_typed_disclosure(corp_name: str, report_nm: str, data: dict) -> str:
 
     elif '유상증자' in report_nm:
         lines.append("[유상증자 결정]")
-        if data.get('iscls'): lines.append(f"• 증자방식: {data['iscls']}")
-        if data.get('nstk_ostk_cnt'): lines.append(f"• 신주 발행수: {data['nstk_ostk_cnt']}주")
+        # 증자방식 실제 키는 ic_mthn (구 iscls는 폴백으로 유지)
+        mthn = data.get('ic_mthn') or data.get('iscls')
+        if mthn: lines.append(f"• 증자방식: {mthn}")
+        if data.get('nstk_ostk_cnt'): lines.append(f"• 신주 발행수(보통주): {data['nstk_ostk_cnt']}주")
+        if data.get('fv_ps'): lines.append(f"• 액면가: {data['fv_ps']}원")
         if data.get('nstk_ispr'): lines.append(f"• 발행가액: {data['nstk_ispr']}원")
-        if data.get('fdpp_op') and data['fdpp_op'] != '-': lines.append(f"• 자금목적(운영): {data['fdpp_op']}원")
-        if data.get('allot_mthn'): lines.append(f"• 배정방법: {data['allot_mthn']}")
+        if data.get('bfic_tisstk_ostk'): lines.append(f"• 증자 전 발행주식수: {data['bfic_tisstk_ostk']}주")
+        # 자금 목적은 항목별 '배정액'이다 — 전 항목 표기 (총 발행금액으로 단정 금지)
+        for key, label in (('fdpp_fclt', '시설'), ('fdpp_bsninh', '영업양수'),
+                           ('fdpp_op', '운영'), ('fdpp_dtrp', '채무상환'),
+                           ('fdpp_ocsa', '타법인증권취득'), ('fdpp_etc', '기타')):
+            if data.get(key) and data[key] != '-':
+                lines.append(f"• 자금목적({label}): {data[key]}원")
         if data.get('nstk_sdtpd_bgd'): lines.append(f"• 신주배정기준일: {data['nstk_sdtpd_bgd']}")
         if data.get('pymd'): lines.append(f"• 납입일: {data['pymd']}")
 
@@ -220,21 +238,39 @@ def format_typed_disclosure(corp_name: str, report_nm: str, data: dict) -> str:
 
     elif '합병' in report_nm:
         lines.append("[합병 결정]")
-        if data.get('mrgcmp_nm'): lines.append(f"• 합병대상: {data['mrgcmp_nm']}")
-        if data.get('mg_rt'): lines.append(f"• 합병비율: {data['mg_rt']}")
-        if data.get('mgdt'): lines.append(f"• 합병기일: {data['mgdt']}")
+        # 실제 키: mgptncmp_cmpnm(상대법인)·mgsc_mgdt(합병기일)·rs_sm_atn(주총 소집 여부)
+        # — 구 키(mrgcmp_nm/mgdt)만 조회해 카드가 비던 결함 수정 (2026-08-18 평가)
+        target = data.get('mgptncmp_cmpnm') or data.get('mrgcmp_nm')
+        if target: lines.append(f"• 합병상대: {target}")
+        # 관계는 mgptncmp_rl_cmpn이다. r2 평가에서 nmgcmp_rlst_atn(다른 의미의
+        # 필드, '해당사항없음')을 관계로 오표기한 버그를 judge가 잡아 수정.
+        if data.get('mgptncmp_rl_cmpn') and data['mgptncmp_rl_cmpn'] != '-':
+            lines.append(f"• 상대법인과의 관계: {data['mgptncmp_rl_cmpn']}")
+        if data.get('mg_rt'):
+            lines.append(f"• 합병비율: {' '.join(str(data['mg_rt']).split())}")  # 원문 개행 정리
+        mgdt = data.get('mgsc_mgdt') or data.get('mgdt')
+        if mgdt: lines.append(f"• 합병기일: {mgdt}")
+        if data.get('rs_sm_atn'):
+            lines.append(f"• 주주총회 소집 여부: {data['rs_sm_atn']}")
         if data.get('mgr_nstk_ismt_atn'): lines.append(f"• 신주발행: {data['mgr_nstk_ismt_atn']}")
 
     elif '자기주식' in report_nm:
         if '취득' in report_nm:
             lines.append("[자기주식 취득 결정]")
+            if data.get('aqpln_prc_ostk'): lines.append(f"• 보통주 취득금액: {data['aqpln_prc_ostk']}원")
+            if data.get('aqpln_stk_ostk'): lines.append(f"• 보통주 취득수량: {data['aqpln_stk_ostk']}주")
+            if data.get('aq_pp'): lines.append(f"• 취득목적: {data['aq_pp']}")
+            if data.get('aq_mth'): lines.append(f"• 취득방법: {data['aq_mth']}")
+            if data.get('aqpln_bgd'): lines.append(f"• 취득기간: {data['aqpln_bgd']} ~ {data.get('aqpln_edd', '')}")
         else:
             lines.append("[자기주식 처분 결정]")
-        if data.get('aqpln_prc_ostk'): lines.append(f"• 보통주 취득금액: {data['aqpln_prc_ostk']}원")
-        if data.get('aqpln_stk_ostk'): lines.append(f"• 보통주 취득수량: {data['aqpln_stk_ostk']}주")
-        if data.get('aq_pp'): lines.append(f"• 취득목적: {data['aq_pp']}")
-        if data.get('aq_mth'): lines.append(f"• 취득방법: {data['aq_mth']}")
-        if data.get('aqpln_bgd'): lines.append(f"• 취득기간: {data['aqpln_bgd']} ~ {data.get('aqpln_edd', '')}")
+            # 처분(dppln_*) 필드가 통째로 빠져 카드가 비던 결함 수정 (2026-08-18 평가,
+            # 씨젠 사례 — 수치가 있는데 요약이 '미제공'이라고 서술)
+            if data.get('dppln_stk_ostk'): lines.append(f"• 처분예정 주식수(보통주): {data['dppln_stk_ostk']}주")
+            if data.get('dpstk_prc_ostk'): lines.append(f"• 처분단가(보통주): {data['dpstk_prc_ostk']}원")
+            if data.get('dppln_prc_ostk'): lines.append(f"• 처분예정금액(보통주): {data['dppln_prc_ostk']}원")
+            if data.get('dp_pp'): lines.append(f"• 처분목적: {data['dp_pp']}")
+            if data.get('dpprpd_bgd'): lines.append(f"• 처분기간: {data['dpprpd_bgd']} ~ {data.get('dpprpd_edd', '')}")
 
     else:
         # 기타 유형은 데이터 그대로
@@ -261,13 +297,21 @@ async def summarize_typed_disclosure(
         return card
 
     # AI로 추가 인사이트 보완
+    # 규칙은 2026-08-18 평가에서 judge가 잡은 실제 위반 유형을 하나씩 막는다:
+    # 새 수치 파생(주당단가·일수 계산), 배정액을 총액으로 단정, '미제공' 서술,
+    # 데이터에 없는 사실(주총 결과·지분율 변화) 단정.
     prompt = chr(10).join([
         f"기업명: {corp_name}",
         f"공시 유형: {report_nm}",
         f"공시 핵심 데이터:",
         card,
         "",
-        "위 데이터를 바탕으로 투자자가 주목해야 할 핵심 포인트 1-2줄만 추가해주세요. 숫자 중심으로.",
+        "위 데이터에서 투자자가 주목할 핵심 포인트 1-2줄만 추가하세요. 규칙:",
+        "1. 카드에 적힌 수치·날짜만 언급한다. 새 수치를 계산하지 않는다 (주당 단가, 남은 일수, 합계, 비율 환산 금지).",
+        "2. 자금목적 배정액을 '총 발행금액'이나 '조달 총액'으로 단정하지 않는다.",
+        "3. 카드에 없는 항목은 언급 자체를 하지 않는다 ('미제공', '정보 없음' 같은 서술 금지).",
+        "4. 카드에 없는 사실(주주총회 결과, 지분율 변화 등)을 단정하지 않는다.",
+        "5. 매수/매도/호재/악재 등 투자 판단 표현을 쓰지 않는다.",
     ])
     
     ai_comment = await summarize_with_openai(prompt)

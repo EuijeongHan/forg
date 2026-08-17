@@ -44,6 +44,7 @@ KST = ZoneInfo("Asia/Seoul")
 JUDGE_MODEL = "gpt-5"
 
 JUDGE_PROMPT = """당신은 공시 요약의 사실 검증관입니다. 아래 [정형 데이터]가 사실의 전부입니다.
+오늘 날짜(KST): {today}
 
 [정형 데이터]
 {typed}
@@ -57,6 +58,8 @@ JUDGE_PROMPT = """당신은 공시 요약의 사실 검증관입니다. 아래 [
 판정 기준:
 - 숫자·날짜·비율이 정형 데이터와 다르면 error
 - 정형 데이터에 없는 사실 주장(추측·해석 제외한 단정)은 error
+- 'D-n' 또는 'D-Day' 표기는 (해당 일자 − 오늘)의 결정론 계산 결과다.
+  위의 오늘 날짜 기준으로 검산해 맞으면 error가 아니다
 - 일반적 배경 설명이나 신중한 해석 문장은 error 아님
 - 매수/매도/호재/악재/목표가 등 투자 판단 표현이 있으면 opinion=true"""
 
@@ -70,6 +73,7 @@ async def judge_with_llm(summary: str, typed_data: dict, model: str = JUDGE_MODE
         resp = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": JUDGE_PROMPT.format(
+                today=datetime.now(KST).strftime("%Y-%m-%d"),
                 typed=json.dumps(typed_data, ensure_ascii=False),
                 summary=summary,
             )}],
@@ -212,6 +216,7 @@ async def _main():
     ap.add_argument("--limit", type=int, default=30)
     ap.add_argument("--out-dir", default="evals/results")
     ap.add_argument("--no-judge", action="store_true", help="티어1 judge 생략(결정론만)")
+    ap.add_argument("--tag", default="", help="결과 파일명 접미사 (예: r2)")
     args = ap.parse_args()
 
     import subprocess
@@ -260,14 +265,15 @@ async def _main():
 
     out = pathlib.Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    with open(out / f"{date}-summary-eval.jsonl", "w", encoding="utf-8") as f:
+    suffix = f"-{args.tag}" if args.tag else ""
+    with open(out / f"{date}-summary-eval{suffix}.jsonl", "w", encoding="utf-8") as f:
         for r in results:
             f.write(json.dumps(r, ensure_ascii=False, default=str) + "\n")
     report = render_report(metrics, results, meta)
-    (out / f"{date}-summary-eval.md").write_text(report, encoding="utf-8")
+    (out / f"{date}-summary-eval{suffix}.md").write_text(report, encoding="utf-8")
 
     print(json.dumps(metrics, ensure_ascii=False, indent=2, default=str))
-    print(f"\n리포트: {out / f'{date}-summary-eval.md'}")
+    print(f"\n리포트: {out / f'{date}-summary-eval{suffix}.md'}")
 
 
 if __name__ == "__main__":
