@@ -34,8 +34,8 @@ DART list.json ─(60초 폴링)→ 저장 ─→ 중요공시 선별 ─→ 워
 ```
 
 **스택**: Python 3.11 · FastAPI · APScheduler · SQLAlchemy(async)+asyncpg · PostgreSQL ·
-python-telegram-bot · OpenAI/Anthropic/Gemini(요약 폴백 체인). 배포 대상은 Railway(Docker)이나
-현재는 중단 상태다([상태](#상태) 참조).
+python-telegram-bot · OpenAI/Anthropic/Gemini(요약 폴백 체인). 배포는 Railway(Docker),
+운영 상태는 [상태](#상태) 참조.
 
 모듈 구조와 DART 규약은 [CLAUDE.md](../CLAUDE.md)(개괄)·[SKILL.md](../SKILL.md)(구현 세부) 참조.
 
@@ -107,18 +107,23 @@ PR·main push마다 GitHub Actions가 전체 행동 테스트를 실행한다.
 
 ## 상태
 
-**현재 상시 운영 중이 아니다.** Railway 배포는 2026-04-22가 마지막이고 2026-05-23에
-`inactive` 처리됐다. 이후 main에 쌓인 커밋은 아직 배포되지 않았으므로, 실제 알림 발송은
-멈춰 있다고 보면 된다. 로컬은 `docker compose up`으로 기동해 확인할 수 있다.
+**프로덕션 운영 중 (Railway Hobby, 2026-08-18 복구).** 2026-05-23 Railway 무료
+트라이얼 만료로 중단됐던 배포를 유료 전환 후 재가동했다. 현재 배포 코드는 등급
+알림(#49)까지 포함한 최신 main이며, 마이그레이션 0001~0003이 프로덕션 PostgreSQL에
+적용 확인됐다. 로컬 `docker compose up`은 이제 개발용이다 — **같은 텔레그램 토큰으로
+Railway와 동시에 켜면 명령 수신이 씹히고 알림이 중복되므로**, 로컬 기동 시 별도
+개발 토큰을 쓰거나 Railway와 겹치지 않게 한다.
 
-재배포 시 확인할 것:
+운영 주의사항:
 
+- **키를 로테이션하면 Railway Variables에도 반영해야 한다.** 2026-07 봇 토큰
+  재발급이 로컬 `.env`에만 반영돼, 복구 첫 배포에서 텔레그램 인증이 거부됐던
+  전례가 있다(변수 교체 후 정상화).
 - `DATABASE_URL`은 Railway PostgreSQL 값이어야 한다. 로컬 `.env`의 `db:5432`는
   docker compose 내부 호스트명이라 그대로 쓰면 안 된다.
 - 신규 환경변수 `LLM_DAILY_CALL_LIMIT`(기본 500)·`ENABLE_EVENT_CARDS`(기본 false)는
   선택이다. 미설정이면 기본값으로 동작한다.
-- 기동 로그에 `DB 마이그레이션 적용 완료`·`텔레그램 봇 시작 완료`가 찍히는지 본다.
-  마이그레이션 0001은 사용자별 중복 발송을 막는 수정이라 적용 여부가 중요하다.
+- 배포 후 기동 로그에서 `DB 마이그레이션 적용 완료`·`텔레그램 봇 시작 완료`를 확인한다.
 
 로드맵은 이슈 [#26](https://github.com/EuijeongHan/forg/issues/26) 기준으로 운영 안정화(Stage 0)
 완료, 이벤트 카드·정정 비교 계층을 플래그 뒤에서 선구축 중이다. 제품 방향 재정의는
