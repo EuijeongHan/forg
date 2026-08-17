@@ -39,6 +39,8 @@ jobs:
         run: python tests/test_phase1_commands.py
       - name: Tiered alerts (market-wide urgent, coverage fix, digest)
         run: python tests/test_tiered_alerts.py
+      - name: Eval harness (tier-0 deterministic + judge aggregation)
+        run: python tests/test_eval_harness.py
 
   # 마이그레이션은 PostgreSQL 전용 DO 블록이라 SQLite 기반 행위 테스트로는 검증되지
   # 않는다. 실제 PostgreSQL에 올려 적용 가능 여부와 멱등성(두 번 실행)을 확인한다.
