@@ -34,7 +34,7 @@ DART list.json ─(60초 폴링)→ 저장 ─→ 중요공시 선별 ─→ 워
 ```
 
 **스택**: Python 3.11 · FastAPI · APScheduler · SQLAlchemy(async)+asyncpg · PostgreSQL ·
-python-telegram-bot · OpenAI/Anthropic/Gemini(요약 폴백 체인). 배포는 Railway(Docker),
+python-telegram-bot · OpenAI→Gemini→Claude(요약 폴백 체인). 배포는 Railway(Docker),
 운영 상태는 [상태](#상태) 참조.
 
 모듈 구조와 DART 규약은 [CLAUDE.md](../CLAUDE.md)(개괄)·[SKILL.md](../SKILL.md)(구현 세부) 참조.

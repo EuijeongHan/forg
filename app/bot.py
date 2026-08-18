@@ -315,20 +315,19 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-def _settings_view(user):
-    sync = bool(user.sync_keywords)
-    today_kw = user.today_keywords or "없음"
-    mytoday_kw = user.mytoday_keywords or "없음"
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(
-        "키워드 동기화: " + ("ON ✅" if sync else "OFF ❌"),
-        callback_data="toggle_sync",
-    )]])
-    text = (
-        "⚙️ 설정\n\n📌 /today 키워드: " + today_kw
-        + "\n📌 /mytoday 키워드: " + mytoday_kw
-        + "\n\n키워드 동기화 ON 시 /keyword 설정이 /mykeyword에도 동일 적용됩니다."
+async def _settings_text(chat_id: str) -> str:
+    """현재 상태 요약. 키워드 동기화 UI는 /keyword 폐기와 함께 제거했다
+    (죽은 설정을 보여주면 사용자가 켜고 끄며 의미를 찾게 된다)."""
+    watchlist = await watchlist_service.list_watchlist(chat_id)
+    return (
+        "⚙️ 설정\n\n"
+        f"📋 관심기업: {len(watchlist)}곳 (/list 로 확인, /add 로 추가)\n\n"
+        "🔔 알림은 자동입니다 — 별도 설정이 없습니다.\n"
+        "  🚨 긴급 — 시장 전체 중대 공시, 항상 켜짐\n"
+        "  ⚠️ 중요 — 관심기업 핵심 공시, 즉시\n"
+        "  📄 참고 — 관심기업 그 외 공시, 매일 18:30 묶음\n\n"
+        "🗑 데이터 전체 삭제: /deletedata"
     )
-    return text, keyboard
 
 
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -338,21 +337,16 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("먼저 /start 를 입력해주세요.")
         return
 
-    text, keyboard = _settings_view(user)
-    await update.message.reply_text(text, reply_markup=keyboard)
+    await update.message.reply_text(await _settings_text(chat_id))
 
 
 async def toggle_sync_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """과거 메시지에 남아 있는 '키워드 동기화' 버튼용 — 기능은 폐기됐고,
+    누르면 현재 설정 화면으로 바꿔준다. 상태는 건드리지 않는다."""
     query = update.callback_query
-    await query.answer()
+    await query.answer("키워드 동기화 설정은 폐기되었습니다.")
     chat_id = str(query.from_user.id)
-
-    user = await user_service.toggle_sync(chat_id)
-    if not user:
-        return
-
-    text, keyboard = _settings_view(user)
-    await query.edit_message_text(text, reply_markup=keyboard)
+    await query.edit_message_text(await _settings_text(chat_id))
 
 
 ASK_MAX_REPLY = 4000  # 텔레그램 한도 내 (notifier.MAX_MESSAGE_LENGTH와 동일 기준)
