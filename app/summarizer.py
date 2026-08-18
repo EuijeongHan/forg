@@ -135,7 +135,9 @@ async def summarize_with_gemini(prompt):
         import asyncio
         import google.generativeai as genai
         genai.configure(api_key=__import__("os").getenv("GEMINI_API_KEY"))
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        # gemini-1.5-flash는 퇴역함(2026-08-18 프로덕션 404 실측). 3차 폴백의 역할은
+        # 가용성이므로 고정 버전 대신 현행 flash를 추적하는 별칭을 쓴다.
+        model = genai.GenerativeModel("gemini-flash-latest")
         # 동기 SDK — 스레드로 오프로드
         response = await asyncio.to_thread(model.generate_content, SYSTEM_PROMPT + chr(10) + prompt)
         return response.text
