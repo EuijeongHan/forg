@@ -193,7 +193,13 @@ async def summarize_by_receipt(receipt_no: str, hint: dict | None = None) -> dic
     resolved: dict | None = None
 
     if not corp_code or not rcept_dt:
-        disclosures = await fetch_recent_disclosures()
+        # 재해석은 보강 단계다 — DART 조회가 실패해도 hint만으로 요약을 계속한다
+        # (정형 API를 못 타면 원문 크롤링 경로가 받는다)
+        try:
+            disclosures = await fetch_recent_disclosures()
+        except Exception as e:
+            print(f"공시 재해석 실패 (rcept_no={receipt_no}): {type(e).__name__}: {e}")
+            disclosures = []
         for d in disclosures:
             if d["rcept_no"] == receipt_no:
                 corp_name = d.get("corp_name", corp_name)
