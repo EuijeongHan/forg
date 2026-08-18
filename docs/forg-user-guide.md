@@ -1,5 +1,6 @@
 # forG 사용 안내
 
+> **forG — Grounded Intelligence for Corporate Filings**
 > DART 공시를 24시간 감시해서, 중요한 것만 골라 텔레그램으로 보내주는 도구입니다.
 > 숫자는 가능한 한 DART 정형 데이터를 그대로 쓰고, AI 요약은 보조로만 씁니다.
 > 모든 알림에 **원문 링크**가 붙습니다 — 판단은 항상 원문으로.
