@@ -358,3 +358,32 @@ async def send_daily_digest():
             except Exception as e:
                 await session.rollback()
                 print(f"다이제스트 실패 (chat={user.chat_id}): {type(e).__name__}: {e}")
+
+
+async def run_llm_canary():
+    """LLM 프로바이더 캐너리 — 공시가 없는 날에도 잔액·키 문제를 감지한다.
+
+    잔액 조회 API가 없으므로(OpenAI 일반 키) 초소형 실호출이 유일한 검증.
+    개별 프로바이더의 잔액/인증 오류 경보는 summarizer가 1일 1회 보내고,
+    여기서는 '전 프로바이더 전멸'(요약 완전 중단)만 추가로 경보한다.
+    결과는 poll_status에 남아 /health로 노출된다.
+    """
+    from summarizer import check_llm_providers
+
+    try:
+        results = await check_llm_providers()
+    except Exception as e:
+        print(f"LLM 캐너리 실행 실패: {type(e).__name__}: {e}")
+        return
+
+    poll_status["llm_providers"] = results
+    poll_status["llm_canary_at"] = _now_kst_iso()
+    dead = [name for name, st in results.items() if not st.get("ok")]
+    print(f"LLM 캐너리: {len(results) - len(dead)}/{len(results)} 정상"
+          + (f" (실패: {', '.join(dead)})" if dead else ""))
+
+    if dead and len(dead) == len(results):
+        await _notify_operator(
+            "🚨 forG: LLM 프로바이더 전원 실패 — 요약이 완전히 중단된 상태입니다.\n"
+            + "\n".join(f"· {n}: {results[n].get('error') or '?'}" for n in dead)
+        )

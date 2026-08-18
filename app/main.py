@@ -1,12 +1,12 @@
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI
 from database import init_db
-from tasks import process_disclosures, send_daily_digest
+from tasks import process_disclosures, run_llm_canary, send_daily_digest
 from bot import create_bot_app
 from config import POLLING_INTERVAL, TELEGRAM_CHAT_ID
 from notifier import send_system_message
@@ -83,6 +83,16 @@ async def lifespan(app: FastAPI):
         id="daily_digest",
         max_instances=1,
         coalesce=True,
+    )
+    # LLM 프로바이더 캐너리 — 배포 90초 후 1회(키 교체 즉시 검증) + 매일 08:30 KST
+    # (공시 시작 전). 잔액 조회 API가 없어 실호출이 유일한 검증이다.
+    scheduler.add_job(
+        run_llm_canary,
+        CronTrigger(hour=8, minute=30, timezone=_KST),
+        id="llm_canary",
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=90),
     )
     scheduler.start()
     print(f"DART 폴링 시작 (주기: {POLLING_INTERVAL}초) + 다이제스트 18:30 KST")
