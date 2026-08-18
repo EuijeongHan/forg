@@ -82,8 +82,8 @@ async def check_llm_providers() -> dict:
     배포 직후 1회 + 매일 아침 스케줄 실행(main.py). 비용은 회당 1원 미만.
     """
     for name, fn in (("openai", summarize_with_openai),
-                     ("claude", summarize_with_claude),
-                     ("gemini", summarize_with_gemini)):
+                     ("gemini", summarize_with_gemini),
+                     ("claude", summarize_with_claude)):
         out = await fn("상태 점검입니다. 'ok' 한 단어로만 답하세요.")
         if not out:
             # 실패 상세는 각 summarize_with_*의 except가 provider_status에 기록함
@@ -220,6 +220,22 @@ async def summarize_with_gemini(prompt):
         await _alert_provider_issue("gemini", str(e))
         return None
 
+async def _generate_with_fallback(prompt) -> str | None:
+    """폴백 체인: OpenAI → Gemini → Claude. 첫 성공 결과를 반환한다.
+
+    Claude가 최후순위인 이유: 단가가 가장 높아($3/$15) 상시 폴백이 아니라
+    나머지 둘이 모두 죽었을 때의 최후 보루로 쓴다(2026-08-18 결정).
+    """
+    for label, fn in (("OpenAI", summarize_with_openai),
+                      ("Gemini", summarize_with_gemini),
+                      ("Claude", summarize_with_claude)):
+        result = await fn(prompt)
+        if result:
+            print(f"{label} 요약 성공")
+            return result
+    return None
+
+
 async def summarize_disclosure(
     corp_name: str, report_nm: str, content: str, bypass_budget: bool = False
 ) -> str:
@@ -231,19 +247,8 @@ async def summarize_disclosure(
 
     prompt = build_prompt(corp_name, report_nm, content)
 
-    result = await summarize_with_openai(prompt)
+    result = await _generate_with_fallback(prompt)
     if result:
-        print("OpenAI 요약 성공")
-        return result
-
-    result = await summarize_with_claude(prompt)
-    if result:
-        print("Claude 요약 성공")
-        return result
-
-    result = await summarize_with_gemini(prompt)
-    if result:
-        print("Gemini 요약 성공")
         return result
 
     return "요약 생성에 실패했습니다. DART에서 직접 확인해주세요."
@@ -391,8 +396,10 @@ async def summarize_typed_disclosure(
         "5. 매수/매도/호재/악재 등 투자 판단 표현을 쓰지 않는다.",
     ])
     
-    ai_comment = await summarize_with_openai(prompt)
-    
+    # 카드 수치는 이미 확보됐으므로 코멘트 생성은 실패해도 무방하지만,
+    # 알림 경로와 동일한 폴백 체인을 태워 주력 프로바이더 장애 시에도 유지한다.
+    ai_comment = await _generate_with_fallback(prompt)
+
     if ai_comment:
         return card + chr(10) + chr(10) + "💡 " + ai_comment.strip()
     return card
