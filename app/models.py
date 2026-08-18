@@ -114,6 +114,21 @@ class DisclosureEvent(Base):
     updated_at = Column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
 
 
+class Feedback(Base):
+    """사용자 피드백 (/feedback) — 목적함수(놓침 0)의 실측 데이터 수집 경로.
+
+    운영자 텔레그램 전달과 별개로 DB에 남긴다 — 전달이 실패해도 접수는
+    유실되지 않는다. 신규 테이블이므로 create_all이 생성한다
+    (DisclosureEvent와 동일 — 기존 테이블 ALTER가 아니라 마이그레이션 불필요).
+    """
+    __tablename__ = "feedback"
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    chat_id = Column(String, ForeignKey("users.chat_id"), nullable=False, index=True)
+    text = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=now_utc)
+
+
 class DisclosureRelation(Base):
     """공시 간 연결 (Stage 3 기반, 계획서 §4.2). 우선 정정본→원본(correction_of).
 

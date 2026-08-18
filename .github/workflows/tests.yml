@@ -47,6 +47,8 @@ jobs:
         run: python tests/test_typed_card.py
       - name: Query service loop (tool-calling, multi-turn, guards)
         run: python tests/test_query_service.py
+      - name: Feedback command (store-first, operator forward, deletion)
+        run: python tests/test_feedback.py
 
   # 마이그레이션은 PostgreSQL 전용 DO 블록이라 SQLite 기반 행위 테스트로는 검증되지
   # 않는다. 실제 PostgreSQL에 올려 적용 가능 여부와 멱등성(두 번 실행)을 확인한다.
