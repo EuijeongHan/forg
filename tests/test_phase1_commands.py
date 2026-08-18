@@ -30,10 +30,22 @@ MARKET = [
      "corp_code": "C9", "rcept_dt": "20260812"},
 ]
 
-state = {"market": list(MARKET)}
+HISTORY = [
+    {"rcept_no": "H1", "corp_name": "가나전자", "report_nm": "전환사채발행결정",
+     "corp_code": "C1", "rcept_dt": "20260810"},
+    {"rcept_no": "H2", "corp_name": "다라화학", "report_nm": "기업설명회(IR)개최",
+     "corp_code": "C2", "rcept_dt": "20260810"},
+    {"rcept_no": "H3", "corp_name": "마바바이오", "report_nm": "유상증자결정",
+     "corp_code": "C9", "rcept_dt": "20260810"},
+]
+
+state = {"market": list(MARKET), "range_calls": []}
 
 dart_stub = types.ModuleType("dart")
 async def fetch_recent_disclosures(days=1): return list(state["market"])
+async def fetch_disclosures_range(bgn_de, end_de):
+    state["range_calls"].append((bgn_de, end_de))
+    return [d for d in HISTORY if bgn_de <= d["rcept_dt"] <= end_de]
 async def save_disclosures_to_db(d): pass
 async def fetch_today_disclosures_from_db(important_only=False):
     items = list(state["market"])
@@ -43,9 +55,10 @@ async def fetch_disclosure_detail(r): return ""
 async def fetch_typed_disclosure(c, r, n, d): return {}
 def is_after_hours(t): return False
 def today_kst(): return "20260812"
-for f in (fetch_recent_disclosures, save_disclosures_to_db, fetch_today_disclosures_from_db,
-          is_important, fetch_disclosure_detail, fetch_typed_disclosure,
-          is_after_hours, today_kst):
+def kst_date_str(days_ago=0): return "20260811" if days_ago == 1 else "20260812"
+for f in (fetch_recent_disclosures, fetch_disclosures_range, save_disclosures_to_db,
+          fetch_today_disclosures_from_db, is_important, fetch_disclosure_detail,
+          fetch_typed_disclosure, is_after_hours, today_kst, kst_date_str):
     setattr(dart_stub, f.__name__, f)
 sys.modules["dart"] = dart_stub
 
@@ -109,6 +122,37 @@ async def main():
     r = await ds.query_disclosures(scope="market", important_only=True, query="감사")
     check("헤더에 검색어 표기", "'감사'" in r.header(), True)
     check("헤더에 전체 시장 표기", "전체 시장" in r.header(), True)
+    check("오늘 조회 헤더는 '오늘'", "오늘" in r.header(), True)
+
+    # --- 날짜 토큰 파싱 ---
+    check("YYYYMMDD + 검색어 분리", ds.split_date_and_query("20260810 유상증자"),
+          ("20260810", "유상증자"))
+    check("검색어가 앞이어도 분리", ds.split_date_and_query("유상증자 20260810"),
+          ("20260810", "유상증자"))
+    check("YYYY-MM-DD 지원", ds.split_date_and_query("2026-08-10"), ("20260810", ""))
+    check("'어제' 지원", ds.split_date_and_query("어제"), ("20260811", ""))
+    check("날짜 없으면 전부 검색어", ds.split_date_and_query("유상증자"), (None, "유상증자"))
+    check("존재하지 않는 날짜는 검색어 취급", ds.split_date_and_query("20269999"),
+          (None, "20269999"))
+    check("빈 입력", ds.split_date_and_query(""), (None, ""))
+
+    # --- 지난 날짜 조회 ---
+    r = await ds.query_disclosures(scope="market", important_only=True, date="20260810")
+    check("지난 날짜는 DART 구간 조회 사용", state["range_calls"][-1], ("20260810", "20260810"))
+    check("그날의 중요 공시만", sorted(d["rcept_no"] for d in r.items), ["H1", "H3"])
+    check("헤더에 날짜 표기", "2026.08.10" in r.header(), True)
+
+    r = await ds.query_disclosures(scope="watchlist", corp_codes={"C1"},
+                                   important_only=True, date="20260810")
+    check("지난 날짜 + 워치리스트 필터", [d["rcept_no"] for d in r.items], ["H1"])
+
+    r = await ds.query_disclosures(scope="market", important_only=True,
+                                   query="유상증자", date="20260810")
+    check("지난 날짜 + 검색어 조합", [d["rcept_no"] for d in r.items], ["H3"])
+
+    n_calls = len(state["range_calls"])
+    r = await ds.query_disclosures(scope="market", important_only=True, date="20260812")
+    check("오늘 날짜 명시는 일반 오늘 경로", (r.date, len(state["range_calls"])), (None, n_calls))
 
 
 asyncio.run(main())

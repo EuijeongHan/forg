@@ -183,7 +183,7 @@ async def _send_query_result(update, result, empty_hint: str = ""):
                 f"(검색어를 빼면 {result.total_before_query}건)"
             )
         else:
-            msg = "오늘 공시가 없습니다."
+            msg = f"{result.date_label()} 공시가 없습니다."
             if empty_hint:
                 msg += f"\n{empty_hint}"
             await update.message.reply_text(msg)
@@ -200,9 +200,10 @@ async def _send_query_result(update, result, empty_hint: str = ""):
 
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """관심기업의 오늘 중요 공시. 인자를 주면 이번 조회에만 적용되는 검색어."""
+    """관심기업의 중요 공시 — 기본 오늘. 인자: 검색어·날짜(YYYYMMDD/어제) 조합 가능."""
     chat_id = str(update.effective_chat.id)
-    query = " ".join(context.args) if context.args else ""
+    raw = " ".join(context.args) if context.args else ""
+    date, query = disclosure_service.split_date_and_query(raw)
 
     corp_codes = await watchlist_service.get_corp_codes(chat_id)
     if not corp_codes:
@@ -213,9 +214,10 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text("📋 관심기업 오늘 공시 불러오는 중...")
+    await update.message.reply_text("📋 관심기업 공시 불러오는 중...")
     result = await disclosure_service.query_disclosures(
-        scope="watchlist", corp_codes=corp_codes, important_only=True, query=query
+        scope="watchlist", corp_codes=corp_codes, important_only=True,
+        query=query, date=date,
     )
     await _send_query_result(
         update, result, empty_hint="전체 시장을 보려면 /market 을 입력하세요."
@@ -223,11 +225,12 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """전체 시장의 오늘 중요 공시. 인자를 주면 이번 조회에만 적용되는 검색어."""
-    query = " ".join(context.args) if context.args else ""
-    await update.message.reply_text("📋 전체 시장 오늘 공시 불러오는 중...")
+    """전체 시장의 중요 공시 — 기본 오늘. 인자: 검색어·날짜(YYYYMMDD/어제) 조합 가능."""
+    raw = " ".join(context.args) if context.args else ""
+    date, query = disclosure_service.split_date_and_query(raw)
+    await update.message.reply_text("📋 전체 시장 공시 불러오는 중...")
     result = await disclosure_service.query_disclosures(
-        scope="market", important_only=True, query=query
+        scope="market", important_only=True, query=query, date=date,
     )
     await _send_query_result(update, result)
 
@@ -298,6 +301,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/today 유상증자 - 위 결과를 검색어로 좁히기\n"
         "/market - 전체 시장의 오늘 중요 공시\n"
         "/market 감사보고서 - 위 결과를 검색어로 좁히기\n\n"
+        "지난 날짜 보기: 날짜를 함께 입력 (검색어와 조합 가능)\n"
+        "/today 어제  ·  /market 20260810  ·  /today 20260810 유상증자\n\n"
         "검색어는 이번 조회에만 적용되고 저장되지 않습니다.\n\n"
         "■ 질문하기 (베타)\n"
         "/ask 씨젠 최근 1년 CB 공시 찾아줘 - 자연어로 공시 검색\n"

@@ -18,6 +18,7 @@ DB = pathlib.Path(tempfile.mkdtemp(prefix="forg-test-")) / "watchdog.db"
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{DB}"
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "dummy:token")
 os.environ["TELEGRAM_CHAT_ID"] = "operator-chat"
+os.environ["LLM_ALERT_MUTE"] = ""  # 호스트 .env의 음소거 설정이 새지 않게 고정
 sys.path.insert(0, APP)
 logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
