@@ -7,7 +7,7 @@ moving them to shared storage is a later SaaS-transition task).
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from config import TELEGRAM_BOT_TOKEN
-from services import corp_service, disclosure_service, query_service, user_service, watchlist_service
+from services import corp_service, disclosure_service, feedback_service, query_service, user_service, watchlist_service
 
 pending_selections: dict[str, dict[str, str]] = {}
 disclosure_cache: dict[str, dict] = {}
@@ -41,6 +41,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/market - 전체 시장 오늘 공시\n"
         "/ask 질문 - 자연어 공시 검색 (베타)\n"
         "/list - 등록된 기업 목록\n"
+        "/feedback 내용 - 오류·개선 신고\n"
         "/help - 전체 사용법\n\n"
         "ℹ️ forG는 DART 공시를 AI로 요약해 전달하는 참고용 도구입니다.\n"
         "투자 자문·종목 추천 서비스가 아니며, AI 요약에는 오류·지연이 있을 수 있습니다.\n"
@@ -307,6 +308,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚠️ 중요 - 관심기업의 증자·CB·실적·5%지분·내부자매매·배당 등 즉시 알림\n"
         "📄 참고 - 관심기업의 그 외 공시(정기보고서·IR 등)는 매일 18:30 묶음 전달\n\n"
         "■ 기타\n"
+        "/feedback 내용 - 오류·불편 신고 (특히 '와야 할 알림이 안 온 경우' 제보가 가장 큰 도움이 됩니다)\n"
         "/settings - 설정\n"
         "/deletedata - 내 데이터 전체 삭제\n\n"
         "ℹ️ forG는 DART 공시를 AI로 요약해 전달하는 참고용 도구입니다.\n"
@@ -386,6 +388,42 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(answer, disable_web_page_preview=True)
 
 
+async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """피드백 접수 — DB 저장 후 운영자에게 즉시 전달한다.
+
+    '와야 할 알림이 안 왔다'는 신고가 서비스 목적함수(놓침 0)의 유일한
+    실측 데이터라, 봇 안에서 한 줄로 신고할 수 있게 한다. 저장이 먼저고
+    전달은 그다음 — 운영자 전달이 실패해도 접수는 유실되지 않는다.
+    """
+    chat_id = str(update.effective_chat.id)
+    first_name = update.effective_chat.first_name or ""
+    text = " ".join(context.args) if context.args else ""
+
+    if not text:
+        await update.message.reply_text(
+            "내용을 함께 입력해주세요.\n"
+            "예) /feedback 삼성전자 CB 공시 알림이 안 왔어요\n"
+            "예) /feedback 요약 숫자가 원문과 달라요\n"
+            "예) /feedback 이런 기능이 있으면 좋겠어요\n\n"
+            "특히 '와야 할 알림이 안 온 경우'를 알려주시면 가장 큰 도움이 됩니다."
+        )
+        return
+
+    await feedback_service.save_feedback(chat_id, first_name, text)
+
+    # 운영자 전달 실패는 접수 실패가 아니다 — DB에 이미 남아 있다.
+    try:
+        from config import TELEGRAM_CHAT_ID
+        from notifier import send_system_message
+        if TELEGRAM_CHAT_ID:
+            sender = f"{first_name}({chat_id})" if first_name else chat_id
+            await send_system_message(TELEGRAM_CHAT_ID, f"📨 피드백 — {sender}\n{text}")
+    except Exception as e:
+        print(f"피드백 운영자 전달 실패 (chat={chat_id}): {type(e).__name__}: {e}")
+
+    await update.message.reply_text("접수했습니다. 확인 후 반영하겠습니다. 감사합니다 🙏")
+
+
 async def deletedata(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """개인정보처리방침이 안내한 삭제 요청 경로. 되돌릴 수 없으므로 확인을 받는다."""
     chat_id = str(update.effective_chat.id)
@@ -400,7 +438,7 @@ async def deletedata(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
     await update.message.reply_text(
         "내 데이터를 모두 삭제합니다.\n\n"
-        "삭제 대상: 관심기업 목록, 알림 발송 기록, 계정 정보\n"
+        "삭제 대상: 관심기업 목록, 알림 발송 기록, 피드백, 계정 정보\n"
         "삭제하면 알림이 중단되고 되돌릴 수 없습니다. 다시 쓰려면 /start 로 처음부터 등록해야 합니다.",
         reply_markup=keyboard,
     )
@@ -417,7 +455,8 @@ async def confirm_delete_callback(update: Update, context: ContextTypes.DEFAULT_
     pending_selections.pop(chat_id, None)
     await query.edit_message_text(
         "삭제를 완료했습니다.\n"
-        f"관심기업 {counts['watchlist']}건, 발송 기록 {counts['seen']}건, 계정 {counts['user']}건\n\n"
+        f"관심기업 {counts['watchlist']}건, 발송 기록 {counts['seen']}건, "
+        f"피드백 {counts.get('feedback', 0)}건, 계정 {counts['user']}건\n\n"
         "다시 이용하시려면 /start 를 입력해주세요."
     )
 
@@ -438,6 +477,7 @@ def create_bot_app() -> Application:
     app.add_handler(CommandHandler("market", market))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("ask", ask))
+    app.add_handler(CommandHandler("feedback", feedback))
     app.add_handler(CommandHandler("mytoday", mytoday))
     app.add_handler(CommandHandler("keyword", keyword))
     app.add_handler(CommandHandler("mykeyword", mykeyword))
