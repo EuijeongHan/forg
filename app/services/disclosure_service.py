@@ -10,6 +10,38 @@ _summary_cache: dict[str, dict] = {}
 _SUMMARY_CACHE_MAX = 300
 
 
+def split_date_and_query(raw: str) -> tuple[str | None, str]:
+    """인자 문자열에서 날짜 토큰을 분리한다. (date, 나머지 검색어)를 반환.
+
+    지원 형식: YYYYMMDD, YYYY-MM-DD, '어제'. 날짜로 해석되지 않는 토큰은
+    검색어로 남긴다(예: '20269999'는 존재하지 않는 날짜 → 검색어 취급).
+    날짜 토큰이 없으면 date=None(오늘). 날짜가 여러 개면 첫 번째만 쓴다.
+    """
+    from datetime import datetime as _dt
+
+    date: str | None = None
+    rest: list[str] = []
+    for token in raw.split():
+        if date is None:
+            candidate = None
+            if token == "어제":
+                from dart import kst_date_str
+                candidate = kst_date_str(1)
+            elif len(token) == 10 and token[4] == "-" and token[7] == "-":
+                candidate = token.replace("-", "")
+            elif len(token) == 8 and token.isdigit():
+                candidate = token
+            if candidate:
+                try:
+                    _dt.strptime(candidate, "%Y%m%d")
+                    date = candidate
+                    continue
+                except ValueError:
+                    pass
+        rest.append(token)
+    return date, " ".join(rest)
+
+
 def filter_by_keywords(disclosures: list[dict], keywords: list[str]) -> list[dict]:
     """Keep disclosures whose report_nm or corp_name contains any keyword."""
     if not keywords:
@@ -50,23 +82,29 @@ class QueryResult:
     원래 공시가 없는 건지 알 수 없다.
     """
 
-    __slots__ = ("items", "scope", "important_only", "query", "total_before_query")
+    __slots__ = ("items", "scope", "important_only", "query", "total_before_query", "date")
 
-    def __init__(self, items, scope, important_only, query, total_before_query):
+    def __init__(self, items, scope, important_only, query, total_before_query, date=None):
         self.items = items
         self.scope = scope                      # "watchlist" | "market"
         self.important_only = important_only
         self.query = query                      # 이번 조회에만 적용된 검색어(없으면 "")
         self.total_before_query = total_before_query
+        self.date = date                        # YYYYMMDD 지난 날짜 조회, None=오늘
 
     @property
     def filtered_to_empty(self) -> bool:
         """공시은 있었는데 검색어 때문에 0건이 된 경우."""
         return not self.items and self.total_before_query > 0
 
+    def date_label(self) -> str:
+        if not self.date:
+            return "오늘"
+        return f"{self.date[:4]}.{self.date[4:6]}.{self.date[6:8]}"
+
     def header(self) -> str:
         scope_label = "관심기업" if self.scope == "watchlist" else "전체 시장"
-        parts = [f"📋 {scope_label} 오늘 공시"]
+        parts = [f"📋 {scope_label} {self.date_label()} 공시"]
         if self.important_only:
             parts.append("중요")
         if self.query:
@@ -79,20 +117,38 @@ async def query_disclosures(
     corp_codes: set[str] | None = None,
     important_only: bool = True,
     query: str = "",
+    date: str | None = None,
 ) -> QueryResult:
-    """조회 경로 단일 진입점 — 범위·중요도·검색어를 인자로만 받는다.
+    """조회 경로 단일 진입점 — 범위·중요도·검색어·날짜를 인자로만 받는다.
 
     저장된 키워드를 몰래 적용하지 않는다. 사용자가 모르는 영구 필터 때문에
     결과가 달라지는 것이 기존 /keyword 설계의 핵심 문제였다(개편안 §2.1).
+
+    date(YYYYMMDD)가 있으면 그날 공시를 DART에서 실시간 조회한다. DB를 거치지
+    않는 이유: 서비스 가동 전 날짜는 DB에 없고, 조회용 과거 데이터를 매번
+    저장하면 하루 수천 행이 쌓인다 — 과거 조회는 읽기 전용으로 둔다.
     """
     from dart import (
         fetch_today_disclosures_from_db,
+        fetch_disclosures_range,
         fetch_recent_disclosures,
         save_disclosures_to_db,
         is_important,
+        today_kst,
     )
 
-    if scope == "watchlist":
+    if date == today_kst():
+        date = None  # 오늘 날짜를 명시한 경우 일반 오늘 경로와 동일
+
+    if date:
+        disclosures = await fetch_disclosures_range(date, date)
+        items = disclosures
+        if scope == "watchlist":
+            codes = corp_codes or set()
+            items = [d for d in items if d.get("corp_code") in codes]
+        if important_only:
+            items = [d for d in items if is_important(d.get("report_nm", ""))]
+    elif scope == "watchlist":
         disclosures = await fetch_recent_disclosures()
         codes = corp_codes or set()
         items = [d for d in disclosures if d.get("corp_code") in codes]
@@ -109,7 +165,7 @@ async def query_disclosures(
     if query:
         items = filter_by_keywords(items, [query])
 
-    return QueryResult(items, scope, important_only, query, total_before_query)
+    return QueryResult(items, scope, important_only, query, total_before_query, date)
 
 
 async def summarize_by_receipt(receipt_no: str, hint: dict | None = None) -> dict:
