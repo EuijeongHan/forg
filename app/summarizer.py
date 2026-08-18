@@ -25,6 +25,72 @@ def _budget_allows() -> bool:
     return True
 
 
+# ── 프로바이더 가용성 감시 (2026-08-18 프로덕션 3중 폴백 전멸 재발 방지) ──
+# OpenAI는 일반 API 키로 잔액 조회 API를 제공하지 않는다. 따라서 잔액·키 상태의
+# 유일한 검증은 실호출이다: 실패를 분류해 잔액/인증류는 운영자에게 1일 1회 경보하고,
+# 마지막 상태를 provider_status로 남겨 /health에 노출한다. 폴백 체인이 실패를
+# 조용히 가리는 것("조용한 강등")이 이번 사고의 본질이었다.
+provider_status: dict = {}          # {"openai": {"ok": bool, "error": str|None, "at": iso}}
+_provider_alert_date: dict = {}     # provider -> KST 날짜 (1일 1회 경보)
+
+_BILLING_MARKERS = ("insufficient_quota", "credit", "billing", "quota")
+_AUTH_MARKERS = ("401", "unauthorized", "invalid_api_key", "authentication",
+                 "api key", "rejected by the server")
+
+
+def _classify_llm_error(err: str) -> str:
+    """billing/auth는 사람이 고쳐야 하는 오류(경보 대상), 나머지는 일시 오류(폴백이 처리)."""
+    low = err.lower()
+    if any(m in low for m in _BILLING_MARKERS):
+        return "billing"
+    if any(m in low for m in _AUTH_MARKERS):
+        return "auth"
+    return "other"
+
+
+def _record_provider(name: str, ok: bool, error: str | None = None):
+    provider_status[name] = {
+        "ok": ok,
+        "error": (error or "")[:200] or None,
+        "at": datetime.now(_KST).isoformat(timespec="seconds"),
+    }
+
+
+async def _alert_provider_issue(name: str, err: str):
+    """잔액/인증류 실패를 운영자에게 경보 — 폴백 뒤에 숨은 강등을 드러낸다."""
+    kind = _classify_llm_error(err)
+    if kind == "other":
+        return
+    today = datetime.now(_KST).strftime("%Y%m%d")
+    if _provider_alert_date.get(name) == today:
+        return
+    _provider_alert_date[name] = today
+    label = "잔액 소진" if kind == "billing" else "인증 실패"
+    print(f"프로바이더 경보: {name} {label}")
+    if config.TELEGRAM_CHAT_ID:
+        from notifier import send_system_message
+        await send_system_message(
+            config.TELEGRAM_CHAT_ID,
+            f"⚠️ forG: {name} {label} — 폴백으로 대체 운영 중입니다.\n"
+            f"키/잔액을 확인해주세요 (Railway Variables 동반 갱신).\n{err[:150]}",
+        )
+
+
+async def check_llm_providers() -> dict:
+    """3사 프로바이더에 초소형 실호출 캐너리 — 공시가 없는 날에도 잔액·키 문제를 감지.
+
+    배포 직후 1회 + 매일 아침 스케줄 실행(main.py). 비용은 회당 1원 미만.
+    """
+    for name, fn in (("openai", summarize_with_openai),
+                     ("claude", summarize_with_claude),
+                     ("gemini", summarize_with_gemini)):
+        out = await fn("상태 점검입니다. 'ok' 한 단어로만 답하세요.")
+        if not out:
+            # 실패 상세는 각 summarize_with_*의 except가 provider_status에 기록함
+            provider_status.setdefault(name, {"ok": False, "error": "빈 응답", "at": None})
+    return dict(provider_status)
+
+
 async def _notify_budget_once():
     """한도 도달을 운영자에게 1회 경보 (다음 날 리셋)."""
     global _budget_op_alerted
@@ -107,9 +173,12 @@ async def summarize_with_openai(prompt):
                 {"role": "user", "content": prompt},
             ],
         )
+        _record_provider("openai", True)
         return response.choices[0].message.content
     except Exception as e:
         print("OpenAI 요약 실패:", e)
+        _record_provider("openai", False, str(e))
+        await _alert_provider_issue("openai", str(e))
         return None
 
 async def summarize_with_claude(prompt):
@@ -125,9 +194,12 @@ async def summarize_with_claude(prompt):
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
+        _record_provider("claude", True)
         return message.content[0].text
     except Exception as e:
         print("Claude 요약 실패:", e)
+        _record_provider("claude", False, str(e))
+        await _alert_provider_issue("claude", str(e))
         return None
 
 async def summarize_with_gemini(prompt):
@@ -140,9 +212,12 @@ async def summarize_with_gemini(prompt):
         model = genai.GenerativeModel("gemini-flash-latest")
         # 동기 SDK — 스레드로 오프로드
         response = await asyncio.to_thread(model.generate_content, SYSTEM_PROMPT + chr(10) + prompt)
+        _record_provider("gemini", True)
         return response.text
     except Exception as e:
         print("Gemini 요약 실패:", e)
+        _record_provider("gemini", False, str(e))
+        await _alert_provider_issue("gemini", str(e))
         return None
 
 async def summarize_disclosure(

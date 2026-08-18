@@ -39,6 +39,8 @@ jobs:
         run: python tests/test_phase1_commands.py
       - name: Tiered alerts (market-wide urgent, coverage fix, digest)
         run: python tests/test_tiered_alerts.py
+      - name: LLM provider watchdog (canary, billing/auth alerts)
+        run: python tests/test_llm_watchdog.py
       - name: Eval harness (tier-0 deterministic + judge aggregation)
         run: python tests/test_eval_harness.py
       - name: Typed card regressions (eval-driven fixes)
