@@ -92,6 +92,19 @@ async def main():
     await summarizer._alert_provider_issue("claude", "credit balance is too low")
     check("다른 프로바이더는 별도 경보", len(state["system_msgs"]), 2)
 
+    # ── 파트 2b: 음소거 — 의도적으로 방치한 프로바이더의 경보 소음 차단 ──
+    state["system_msgs"].clear()
+    summarizer._provider_alert_date.clear()
+    os.environ["LLM_ALERT_MUTE"] = "claude"
+    await summarizer._alert_provider_issue("claude", "credit balance is too low")
+    check("음소거된 프로바이더는 경보 없음", len(state["system_msgs"]), 0)
+    await summarizer._alert_provider_issue("openai", "insufficient_quota: no credits")
+    check("음소거는 해당 프로바이더만 적용", len(state["system_msgs"]), 1)
+    os.environ["LLM_ALERT_MUTE"] = ""
+    summarizer._provider_alert_date.clear()
+    await summarizer._alert_provider_issue("claude", "credit balance is too low")
+    check("음소거 해제 시 경보 재개", len(state["system_msgs"]), 2)
+
     # ── 파트 3: 캐너리 집계 ──────────────────────────────────────────
     summarizer.provider_status.clear()
     async def ok_openai(prompt):
@@ -128,8 +141,10 @@ async def main():
                                   "claude": {"ok": False, "error": "credit"},
                                   "gemini": {"ok": False, "error": "404 model"}}
     summarizer.check_llm_providers = all_dead
+    os.environ["LLM_ALERT_MUTE"] = "claude"  # 음소거는 개별 경보만 — 전멸 경보는 무조건
     await tasks.run_llm_canary()
-    check("전멸 → 요약 완전 중단 경보 1건", len(state["system_msgs"]), 1)
+    os.environ["LLM_ALERT_MUTE"] = ""
+    check("전멸 → 요약 완전 중단 경보 1건 (음소거 무관)", len(state["system_msgs"]), 1)
     check("전멸 경보에 원인 나열", "quota" in state["system_msgs"][0], True)
 
 

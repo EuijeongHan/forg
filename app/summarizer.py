@@ -56,10 +56,25 @@ def _record_provider(name: str, ok: bool, error: str | None = None):
     }
 
 
+def _muted_providers() -> set[str]:
+    """경보 음소거 대상 (환경변수 LLM_ALERT_MUTE, 쉼표 구분. 예: claude).
+
+    잔액을 채우지 않기로 결정한 최후순위 프로바이더가 매일 경보를 울리면
+    경보 자체가 소음이 되어 진짜 경보를 묻는다. 음소거해도 로그·/health·
+    '전원 실패' 경보(tasks.run_llm_canary)에는 그대로 잡힌다.
+    """
+    import os
+    raw = os.getenv("LLM_ALERT_MUTE", "")
+    return {p.strip().lower() for p in raw.split(",") if p.strip()}
+
+
 async def _alert_provider_issue(name: str, err: str):
     """잔액/인증류 실패를 운영자에게 경보 — 폴백 뒤에 숨은 강등을 드러낸다."""
     kind = _classify_llm_error(err)
     if kind == "other":
+        return
+    if name.lower() in _muted_providers():
+        print(f"프로바이더 경보 음소거됨: {name} ({kind})")
         return
     today = datetime.now(_KST).strftime("%Y%m%d")
     if _provider_alert_date.get(name) == today:
