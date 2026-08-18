@@ -325,16 +325,28 @@ async def send_daily_digest():
                 if not pending:
                     continue
 
-                shown = pending[:DIGEST_MAX_LINES]
-                lines = [
-                    f"· <b>{escape_html(r.corp_name)}</b> {escape_html(r.report_nm)} "
-                    f'<a href="https://dart.fss.or.kr/dsaf001/main.do?rcpNo={r.rcept_no}">원문</a>'
-                    for r in shown
-                ]
                 header = (
                     f"📄 <b>관심기업 참고 공시</b> ({len(pending)}건)\n"
                     "즉시 알림 대상이 아닌 공시를 하루 1회 묶어 보내드립니다.\n\n"
                 )
+                # 줄 수 한도에 더해 글자 수 예산으로도 제한한다. Seen 기록은 '실제로
+                # 표시된 행'과 일치해야 하므로 발송 단계 절단에 기대면 안 된다 —
+                # 거기서 줄이 빠지면 기록만 되고 표시는 안 된 공시(조용한 놓침)가 된다.
+                # 못 담은 행은 내일 창에서 재시도된다.
+                budget = 3800  # 텔레그램 한도(4000)에서 꼬리 문구 여유
+                shown, lines, used = [], [], len(header)
+                for r in pending[:DIGEST_MAX_LINES]:
+                    line = (
+                        f"· <b>{escape_html(r.corp_name)}</b> {escape_html(r.report_nm)} "
+                        f'<a href="https://dart.fss.or.kr/dsaf001/main.do?rcpNo={r.rcept_no}">원문</a>'
+                    )
+                    if used + len(line) + 1 > budget:
+                        break
+                    shown.append(r)
+                    lines.append(line)
+                    used += len(line) + 1
+                if not shown:
+                    continue  # 첫 행부터 비정상적으로 긴 경우 — 내일 재시도
                 tail = (
                     f"\n\n외 {len(pending) - len(shown)}건은 내일 다이제스트 또는 DART에서 확인해주세요."
                     if len(pending) > len(shown) else ""
