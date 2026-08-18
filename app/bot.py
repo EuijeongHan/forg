@@ -215,10 +215,18 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text("📋 관심기업 공시 불러오는 중...")
-    result = await disclosure_service.query_disclosures(
-        scope="watchlist", corp_codes=corp_codes, important_only=True,
-        query=query, date=date,
-    )
+    try:
+        result = await disclosure_service.query_disclosures(
+            scope="watchlist", corp_codes=corp_codes, important_only=True,
+            query=query, date=date,
+        )
+    except Exception as e:
+        # DART 장애를 "공시 없음"으로 위장하지 않는다 (리뷰 P1과 같은 원칙)
+        print(f"/today 조회 실패 (chat={chat_id}): {type(e).__name__}: {e}")
+        await update.message.reply_text(
+            "지금 DART 조회에 문제가 있습니다. 잠시 후 다시 시도해주세요."
+        )
+        return
     await _send_query_result(
         update, result, empty_hint="전체 시장을 보려면 /market 을 입력하세요."
     )
@@ -229,9 +237,16 @@ async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = " ".join(context.args) if context.args else ""
     date, query = disclosure_service.split_date_and_query(raw)
     await update.message.reply_text("📋 전체 시장 공시 불러오는 중...")
-    result = await disclosure_service.query_disclosures(
-        scope="market", important_only=True, query=query, date=date,
-    )
+    try:
+        result = await disclosure_service.query_disclosures(
+            scope="market", important_only=True, query=query, date=date,
+        )
+    except Exception as e:
+        print(f"/market 조회 실패: {type(e).__name__}: {e}")
+        await update.message.reply_text(
+            "지금 DART 조회에 문제가 있습니다. 잠시 후 다시 시도해주세요."
+        )
+        return
     await _send_query_result(update, result)
 
 

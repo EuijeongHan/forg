@@ -51,6 +51,8 @@ jobs:
         run: python tests/test_feedback.py
       - name: Notifier HTML-safe truncation (review P1)
         run: python tests/test_notifier_truncation.py
+      - name: DART failure propagation (review P1-2, no empty-result masking)
+        run: python tests/test_dart_failure_propagation.py
 
   # 마이그레이션은 PostgreSQL 전용 DO 블록이라 SQLite 기반 행위 테스트로는 검증되지
   # 않는다. 실제 PostgreSQL에 올려 적용 가능 여부와 멱등성(두 번 실행)을 확인한다.

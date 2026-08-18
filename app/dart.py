@@ -9,6 +9,18 @@ DART_BASE_URL = "https://opendart.fss.or.kr/api"
 KST = ZoneInfo("Asia/Seoul")
 
 
+class DartApiError(Exception):
+    """DART 응답이 정상(000)도 빈 결과(013)도 아닌 경우.
+
+    장애를 빈 결과로 위장하지 않기 위해 존재한다(2026-08-19 리뷰 P1).
+    빈 리스트 반환은 '오늘 공시 없음'과 구분이 불가능해서, 키 오류(010)·
+    쿼터 초과(020)·DART 점검(800)이 몇 시간씩 정상 폴링처럼 보였다 —
+    last_success_at까지 갱신되고, 야간·주말엔 empty 경보 조건도 안 걸린다.
+    이 예외로 폴링(tasks)은 fail_streak를 올리고, 봇 조회는 사용자에게
+    오류를 알린다.
+    """
+
+
 def kst_date_str(days_ago: int = 0) -> str:
     """KST 기준 days_ago일 전 날짜(YYYYMMDD)."""
     return (datetime.now(KST) - timedelta(days=days_ago)).strftime("%Y%m%d")
@@ -81,6 +93,12 @@ async def fetch_disclosures_range(bgn_de: str, end_de: str) -> list[dict]:
     """지정 구간(YYYYMMDD, KST 접수일 기준)의 공시 전체 조회 (list.json, 페이지네이션).
 
     과거 날짜 조회(/today 20260810)와 최근 조회가 같은 경로를 쓴다.
+
+    실패를 삼키지 않는다: 013(조회 결과 없음)만 정상적인 빈 결과이고,
+    그 외 비정상 status는 DartApiError, HTTP·JSON 오류는 원 예외 그대로
+    전파한다. 페이지네이션 중간 실패도 부분 결과를 돌려주지 않고 예외로
+    올린다 — 다음 폴링(60초)이 전체를 재시도하며, 부분 결과는 '나머지가
+    없었다'로 읽혀 누락을 만든다.
     """
     url = f"{DART_BASE_URL}/list.json"
     all_disclosures = []
@@ -95,23 +113,22 @@ async def fetch_disclosures_range(bgn_de: str, end_de: str) -> list[dict]:
                 "page_no": page,
                 "page_count": 100,
             }
-            try:
-                response = await client.get(url, params=params, timeout=10)
-                response.raise_for_status()
-                data = response.json()
-                if data.get("status") != "000":
-                    break
-                items = data.get("list", [])
-                if not items:
-                    break
-                all_disclosures.extend(items)
-                total_page = int(data.get("total_page", 1))
-                if page >= total_page:
-                    break
-                page += 1
-            except Exception as e:
-                print(f"DART API 호출 실패: {e}")
+            response = await client.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            status = data.get("status")
+            if status == "013":
+                break  # 조회 결과 없음 — 정상적인 빈 결과 (§4.1)
+            if status != "000":
+                raise DartApiError(f"DART status {status}: {data.get('message', '')}")
+            items = data.get("list", [])
+            if not items:
                 break
+            all_disclosures.extend(items)
+            total_page = int(data.get("total_page", 1))
+            if page >= total_page:
+                break
+            page += 1
 
     return all_disclosures
 
