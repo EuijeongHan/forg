@@ -83,8 +83,12 @@ docker compose exec db psql -U forg -d forg
 #   \q               ← 나가기
 
 # 로컬 DB 백업/복원
-docker compose exec -T db pg_dump -U forg forg > backup.sql
-docker compose exec -T db psql -U forg -d forg < backup.sql
+# ⚠️ 덤프에는 이용자 chat_id·워치리스트·발송 기록(개인정보)이 그대로 들어간다.
+#    이 리포는 공개이므로 덤프를 리포 안에 만들지 않는다 — 반드시 리포 밖 경로로.
+#    (.gitignore가 *.sql·*.dump를 막지만, 방어선은 경로 자체여야 한다.)
+mkdir -p ~/forg-backups
+docker compose exec -T db pg_dump -U forg forg > ~/forg-backups/forg-$(date +%Y%m%d).sql
+docker compose exec -T db psql -U forg -d forg < ~/forg-backups/forg-20260819.sql
 ```
 
 ### 🚨 로컬에서 app을 띄우기 전에 반드시 생각할 것

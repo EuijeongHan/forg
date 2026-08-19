@@ -1,6 +1,28 @@
-.env
+# 비밀 — .env 정확 일치만 막으면 .env.prod(운영 시크릿 전량)·.env.local이 새어나간다.
+# docker-compose.prod.yml이 .env.prod를 요구하므로 이 구멍은 이론이 아니다.
+.env*
+!.env.example
+
+# DB 덤프·로컬 DB — 이용자 chat_id·워치리스트·발송 기록이 그대로 들어 있다.
+# 공개 리포이므로 실수 한 번이 곧 이용자 개인정보 유출이다.
+*.db
+*.sqlite
+*.sqlite3
+*.sql
+*.dump
+
+# 가상환경·캐시
 venv/
+.venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+*.egg-info/
+
+# 편집기·OS
+.idea/
+.vscode/
 .DS_Store
+
+# 로그
 *.log
