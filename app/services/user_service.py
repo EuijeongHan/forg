@@ -45,7 +45,10 @@ async def get_mytoday_keywords(chat_id: str) -> list[str]:
 
 
 async def set_today_keywords(chat_id: str, keywords: str) -> bool:
-    """Set /today keywords. Returns True if also synced to /mytoday."""
+    """(레거시) 저장형 키워드 설정 — /keyword 폐기로 현행 경로에선 호출되지 않는다.
+
+    DB 컬럼과 함께 롤백 대비로만 유지한다. Returns True if also synced.
+    """
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(User).where(User.chat_id == chat_id))
         user = result.scalar_one_or_none()
