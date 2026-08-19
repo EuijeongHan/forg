@@ -84,7 +84,7 @@ async def fetch_recent_disclosures(days: int = 1) -> list[dict]:
 
     폴링 파이프라인은 days=2를 쓴다 — 자정 직전(23:5x) 접수 공시가 날짜가
     넘어간 뒤 조회창 밖으로 빠져 영구 누락되는 것을 막기 위함.
-    봇 조회(/today, /mytoday)는 기본값 1(오늘만)을 유지한다.
+    봇 조회(/my)는 기본값 1(오늘만)을 유지한다.
     """
     return await fetch_disclosures_range(kst_date_str(days - 1), today_kst())
 
@@ -92,7 +92,7 @@ async def fetch_recent_disclosures(days: int = 1) -> list[dict]:
 async def fetch_disclosures_range(bgn_de: str, end_de: str) -> list[dict]:
     """지정 구간(YYYYMMDD, KST 접수일 기준)의 공시 전체 조회 (list.json, 페이지네이션).
 
-    과거 날짜 조회(/today 20260810)와 최근 조회가 같은 경로를 쓴다.
+    과거 날짜 조회(/my 20260810)와 최근 조회가 같은 경로를 쓴다.
 
     실패를 삼키지 않는다: 013(조회 결과 없음)만 정상적인 빈 결과이고,
     그 외 비정상 status는 DartApiError, HTTP·JSON 오류는 원 예외 그대로
