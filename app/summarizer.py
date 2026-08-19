@@ -33,25 +33,37 @@ def _budget_allows() -> bool:
 provider_status: dict = {}          # {"openai": {"ok": bool, "error": str|None, "at": iso}}
 _provider_alert_date: dict = {}     # provider -> KST 날짜 (1일 1회 경보)
 
-_BILLING_MARKERS = ("insufficient_quota", "credit", "billing", "quota")
+# 분류 주의(2026-08-19 교훈): Gemini 429 본문("exceeded your current quota,
+# please check your plan and billing details")에는 'quota'와 'billing'이 둘 다
+# 들어 있다 — 이 단어들을 billing 마커로 쓰면 할당량 초과가 "잔액 소진"으로
+# 오표기된다. Gemini Developer API는 선불 잔액이 아니라 프로젝트 티어별
+# 할당량(RPM/RPD/TPM/TPD) 방식이라 429와 충전 여부는 직접 연결되지 않는다.
+_BILLING_MARKERS = ("insufficient_quota", "credit")
 _AUTH_MARKERS = ("401", "unauthorized", "invalid_api_key", "authentication",
                  "api key", "rejected by the server")
+_QUOTA_MARKERS = ("quota", "rate limit", "rate_limit", "resource_exhausted", "429")
 
 
 def _classify_llm_error(err: str) -> str:
-    """billing/auth는 사람이 고쳐야 하는 오류(경보 대상), 나머지는 일시 오류(폴백이 처리)."""
+    """billing/auth/quota는 사람이 확인할 오류(경보 대상), 나머지는 일시 오류(폴백이 처리).
+
+    billing을 quota보다 먼저 본다 — OpenAI의 잔액 소진(insufficient_quota)도
+    429로 오기 때문에, 전용 마커(insufficient_quota·credit)로 먼저 걸러낸다.
+    """
     low = err.lower()
     if any(m in low for m in _BILLING_MARKERS):
         return "billing"
     if any(m in low for m in _AUTH_MARKERS):
         return "auth"
+    if any(m in low for m in _QUOTA_MARKERS):
+        return "quota"
     return "other"
 
 
 def _record_provider(name: str, ok: bool, error: str | None = None):
     provider_status[name] = {
         "ok": ok,
-        "error": (error or "")[:200] or None,
+        "error": (error or "")[:300] or None,
         "at": datetime.now(_KST).isoformat(timespec="seconds"),
     }
 
@@ -80,14 +92,21 @@ async def _alert_provider_issue(name: str, err: str):
     if _provider_alert_date.get(name) == today:
         return
     _provider_alert_date[name] = today
-    label = "잔액 소진" if kind == "billing" else "인증 실패"
+    label = {"billing": "잔액 소진", "auth": "인증 실패",
+             "quota": "할당량 초과(429)"}[kind]
+    hint = {
+        "billing": "키/잔액을 확인해주세요 (Railway Variables 동반 갱신).",
+        "auth": "키/잔액을 확인해주세요 (Railway Variables 동반 갱신).",
+        # 429는 잔액이 아니라 프로젝트 티어별 할당량(RPM/RPD/TPM/TPD) 문제다.
+        "quota": "키 소속 프로젝트의 할당량·결제 연결을 확인해주세요 (RPM/RPD — ai.dev/usage).",
+    }[kind]
     print(f"프로바이더 경보: {name} {label}")
     if config.TELEGRAM_CHAT_ID:
         from notifier import send_system_message
         await send_system_message(
             config.TELEGRAM_CHAT_ID,
             f"⚠️ forG: {name} {label} — 폴백으로 대체 운영 중입니다.\n"
-            f"키/잔액을 확인해주세요 (Railway Variables 동반 갱신).\n{err[:150]}",
+            f"{hint}\n{err[:300]}",
         )
 
 
@@ -230,9 +249,20 @@ async def summarize_with_gemini(prompt):
         _record_provider("gemini", True)
         return response.text
     except Exception as e:
-        print("Gemini 요약 실패:", e)
-        _record_provider("gemini", False, str(e))
-        await _alert_provider_issue("gemini", str(e))
+        # 429의 어떤 할당량(quotaMetric: RPM/RPD/TPM/TPD)이 걸렸는지와 retryDelay는
+        # str(e)가 아니라 details(QuotaFailure.violations)에 있다 — 버리면 원인
+        # 구분이 불가능해 경보 문구까지 틀린다(2026-08-19 교훈).
+        detail = f"{type(e).__name__}: {e}"
+        try:
+            extra = getattr(e, "details", None)
+            if extra:
+                detail += f" | details: {extra}"
+        except Exception:
+            pass
+        detail = detail[:500]
+        print("Gemini 요약 실패:", detail)
+        _record_provider("gemini", False, detail)
+        await _alert_provider_issue("gemini", detail)
         return None
 
 async def _generate_with_fallback(prompt) -> str | None:

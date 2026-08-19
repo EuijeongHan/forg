@@ -78,6 +78,15 @@ async def main():
     check("401 → auth", c("Error code: 401 - Unauthorized"), "auth")
     check("타임아웃 → other(폴백이 처리)", c("Request timed out"), "other")
     check("모델 404 → other", c("404 models/x is not found for API version v1beta"), "other")
+    # Gemini 429 본문에는 'billing'이 들어 있지만 잔액이 아니라 할당량 문제다
+    check("Gemini 429 → quota (billing 오분류 금지)",
+          c("429 You exceeded your current quota, please check your plan and "
+            "billing details. For more information on this error, head to: "
+            "https://ai.google.dev/gemini-api/docs/rate-limits"), "quota")
+    check("일반 rate limit → quota",
+          c("Rate limit reached for gpt-4o-mini, please try again in 20s"), "quota")
+    check("OpenAI 잔액 소진은 429여도 billing 우선",
+          c("Error code: 429 - insufficient_quota: You have no credits remaining"), "billing")
 
     # ── 파트 2: 1일 1회 경보 ─────────────────────────────────────────
     state["system_msgs"].clear()
@@ -92,6 +101,12 @@ async def main():
     check("'other' 오류는 경보 없음", len(state["system_msgs"]), 1)
     await summarizer._alert_provider_issue("claude", "credit balance is too low")
     check("다른 프로바이더는 별도 경보", len(state["system_msgs"]), 2)
+    await summarizer._alert_provider_issue(
+        "gemini", "429 You exceeded your current quota, please check your plan and billing details.")
+    check("할당량 429도 경보 대상", len(state["system_msgs"]), 3)
+    check("429 경보는 '할당량' 표기 — '잔액 소진' 아님",
+          "할당량" in state["system_msgs"][2] and "잔액 소진" not in state["system_msgs"][2], True)
+    check("429 경보 힌트는 프로젝트 할당량 안내", "RPM" in state["system_msgs"][2], True)
 
     # ── 파트 2b: 음소거 — 의도적으로 방치한 프로바이더의 경보 소음 차단 ──
     state["system_msgs"].clear()
