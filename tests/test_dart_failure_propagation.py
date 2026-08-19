@@ -160,9 +160,9 @@ async def main():
     disclosure_service.query_disclosures = q_boom
 
     u = FakeUpdate()
-    await bot.today(u, type("Ctx", (), {"args": []})())
-    check("/today 장애 시 오류 안내", "문제가 있습니다" in u.message.replies[-1], True)
-    check("/today 장애 시 '공시 없음' 미출력",
+    await bot.my_disclosures(u, type("Ctx", (), {"args": []})())
+    check("/my 장애 시 오류 안내", "문제가 있습니다" in u.message.replies[-1], True)
+    check("/my 장애 시 '공시 없음' 미출력",
           all("공시가 없습니다" not in r for r in u.message.replies), True)
 
     u2 = FakeUpdate()

@@ -37,7 +37,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "2) 이후 새 중요 공시가 올라오면 자동으로 알림이 도착합니다\n"
         "   (상장폐지·회생절차 같은 중대 사건은 관심기업이 아니어도 🚨 즉시 알림)\n\n"
         "자주 쓰는 명령\n"
-        "/today - 관심기업 오늘 공시 (예: /today 유상증자)\n"
+        "/my - 내 관심기업 공시 (예: /my 유상증자)\n"
         "/market - 전체 시장 오늘 공시\n"
         "/ask 질문 - 자연어 공시 검색 (베타)\n"
         "/list - 등록된 기업 목록\n"
@@ -195,12 +195,16 @@ async def _send_query_result(update, result, empty_hint: str = ""):
     shown = min(len(result.items), PAGE_SIZE)
     text = result.header() + "\n공시를 선택하면 요약을 보여드립니다."
     if len(result.items) > PAGE_SIZE:
-        text += f"\n(최근 {shown}건 표시 — 검색어를 붙이면 좁힐 수 있습니다. 예: /today 유상증자)"
+        text += f"\n(최근 {shown}건 표시 — 검색어를 붙이면 좁힐 수 있습니다. 예: /my 유상증자)"
     await update.message.reply_text(text, reply_markup=_disclosure_keyboard(result.items))
 
 
-async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """관심기업의 중요 공시 — 기본 오늘. 인자: 검색어·날짜(YYYYMMDD/어제) 조합 가능."""
+async def my_disclosures(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """관심기업의 중요 공시 — 기본 오늘. 인자: 검색어·날짜(YYYYMMDD/어제) 조합 가능.
+
+    명령명은 /my — /market(전체 시장)과 '범위'로 대칭을 이룬다. 구 명령
+    /today는 시간을 이름으로 써서 날짜 인자와 자기모순이었다(/today 어제).
+    """
     chat_id = str(update.effective_chat.id)
     raw = " ".join(context.args) if context.args else ""
     date, query = disclosure_service.split_date_and_query(raw)
@@ -222,7 +226,7 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         # DART 장애를 "공시 없음"으로 위장하지 않는다 (리뷰 P1과 같은 원칙)
-        print(f"/today 조회 실패 (chat={chat_id}): {type(e).__name__}: {e}")
+        print(f"/my 조회 실패 (chat={chat_id}): {type(e).__name__}: {e}")
         await update.message.reply_text(
             "지금 DART 조회에 문제가 있습니다. 잠시 후 다시 시도해주세요."
         )
@@ -250,9 +254,10 @@ async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_query_result(update, result)
 
 
-async def mytoday(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """구 명령 — /today가 관심기업 기준이 되어 역할이 같아졌다. 당분간 별칭으로 둔다."""
-    await today(update, context)
+async def legacy_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """구 명령(/today·/mytoday) — /my의 조용한 별칭. 깨뜨리지 않고 안내만 한다."""
+    await update.message.reply_text("이 명령은 /my 로 이름이 바뀌었습니다. 이번엔 그대로 조회해드릴게요.")
+    await my_disclosures(update, context)
 
 
 async def view_disclosure_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -288,17 +293,17 @@ async def keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "이제 검색어를 조회할 때 함께 입력합니다. 저장되지 않으므로 다음 조회에\n"
         "영향을 주지 않습니다.\n\n"
         f"전체 시장에서 찾기:  /market {given}\n"
-        f"관심기업에서 찾기:  /today {given}\n\n"
+        f"관심기업에서 찾기:  /my {given}\n\n"
         "자세한 사용법은 /help"
     )
 
 
 async def mykeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """폐기 예정 — keyword와 동일. /today에 인자를 붙이는 방식으로 대체한다."""
+    """폐기 예정 — keyword와 동일. /my에 인자를 붙이는 방식으로 대체한다."""
     given = " ".join(context.args) if context.args else "유상증자"
     await update.message.reply_text(
         "/mykeyword 는 더 이상 사용하지 않습니다.\n\n"
-        f"관심기업 공시를 검색어로 좁히려면:  /today {given}\n"
+        f"관심기업 공시를 검색어로 좁히려면:  /my {given}\n"
         "검색어는 이번 조회에만 적용되고 저장되지 않습니다.\n\n"
         "자세한 사용법은 /help"
     )
@@ -312,12 +317,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/remove 기업명 - 관심기업 삭제\n"
         "/list - 등록된 기업 목록\n\n"
         "■ 공시 조회\n"
-        "/today - 관심기업의 오늘 중요 공시\n"
-        "/today 유상증자 - 위 결과를 검색어로 좁히기\n"
+        "/my - 내 관심기업의 오늘 중요 공시\n"
+        "/my 유상증자 - 위 결과를 검색어로 좁히기\n"
         "/market - 전체 시장의 오늘 중요 공시\n"
         "/market 감사보고서 - 위 결과를 검색어로 좁히기\n\n"
         "지난 날짜 보기: 날짜를 함께 입력 (검색어와 조합 가능)\n"
-        "/today 어제  ·  /market 20260810  ·  /today 20260810 유상증자\n\n"
+        "/my 어제  ·  /market 20260810  ·  /my 20260810 유상증자\n\n"
         "검색어는 이번 조회에만 적용되고 저장되지 않습니다.\n\n"
         "■ 질문하기 (베타)\n"
         "/ask 씨젠 최근 1년 CB 공시 찾아줘 - 자연어로 공시 검색\n"
@@ -493,12 +498,14 @@ def create_bot_app() -> Application:
     app.add_handler(CommandHandler("add", add))
     app.add_handler(CommandHandler("remove", remove))
     app.add_handler(CommandHandler("list", list_corps))
-    app.add_handler(CommandHandler("today", today))
+    app.add_handler(CommandHandler("my", my_disclosures))
     app.add_handler(CommandHandler("market", market))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("ask", ask))
     app.add_handler(CommandHandler("feedback", feedback))
-    app.add_handler(CommandHandler("mytoday", mytoday))
+    # 구 명령 별칭 — 기존 사용자의 손버릇을 깨지 않는다
+    app.add_handler(CommandHandler("today", legacy_today))
+    app.add_handler(CommandHandler("mytoday", legacy_today))
     app.add_handler(CommandHandler("keyword", keyword))
     app.add_handler(CommandHandler("mykeyword", mykeyword))
     app.add_handler(CommandHandler("settings", settings))
