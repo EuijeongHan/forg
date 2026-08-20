@@ -14,11 +14,22 @@ disclosure_cache: dict[str, dict] = {}
 
 
 def build_add_keyboard(results, selected):
+    """검색 결과 선택 키보드.
+
+    callback_data에는 corp_code만 담는다 — 이름까지 넣으면 텔레그램의 64바이트
+    한도를 긴 기업명에서 넘겨 버튼이 통째로 거부된다. 이름은 user_data의
+    검색 결과에서 찾는다.
+    """
+    confirm = InlineKeyboardButton("📥 등록 완료", callback_data="confirm_add")
     keyboard = []
+    # 한 번에 여러 곳을 넣으면 목록이 길어진다. 확인 버튼이 맨 아래에만 있으면
+    # 미리 선택된 것을 그대로 등록하려는 사람도 끝까지 스크롤해야 한다.
+    if len(results) > 10:
+        keyboard.append([confirm])
     for code, name in results:
         label = f"✅ {name}" if code in selected else name
-        keyboard.append([InlineKeyboardButton(label, callback_data=f"toggle:{code}:{name}")])
-    keyboard.append([InlineKeyboardButton("📥 등록 완료", callback_data="confirm_add")])
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"toggle:{code}")])
+    keyboard.append([confirm])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -34,6 +45,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "관심 기업의 핵심 공시만 골라 AI 요약과 함께 즉시 보내드립니다.\n\n"
         "🚀 이렇게 시작하세요\n"
         "1) /add 삼성전자 — 관심 기업 등록\n"
+        "   여러 곳을 한 번에: /add 삼성전자, LG전자, SK하이닉스\n"
         "2) 이후 새 중요 공시가 올라오면 자동으로 알림이 도착합니다\n"
         "   (상장폐지·거래정지·회생절차 등 시장 중대 공시는 관심기업이 아니어도 즉시 알림)\n\n"
         "자주 쓰는 명령\n"
@@ -51,45 +63,83 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """관심기업 검색·선택.
+
+    쉼표나 줄바꿈으로 여러 곳을 한 번에 넣을 수 있다 — 커버리지 종목을 데스크톱에서
+    한 줄로 붙여넣는 사용을 위한 것이다:
+        /add 삼성전자, LG전자, SK하이닉스
+    이름이 정확히 일치한 기업은 미리 선택되므로 '등록 완료' 한 번으로 끝난다.
+    """
     chat_id = str(update.effective_chat.id)
-    if not context.args:
-        await update.message.reply_text("기업명을 입력해주세요.\n예) /add 삼성전자")
+    raw = " ".join(context.args) if context.args else ""
+    terms = corp_service.split_query_terms(raw)
+    if not terms:
+        await update.message.reply_text(
+            "기업명을 입력해주세요.\n"
+            "예) /add 삼성전자\n"
+            "여러 곳을 한 번에: /add 삼성전자, LG전자, SK하이닉스"
+        )
         return
 
-    corp_name_query = " ".join(context.args)
-    await update.message.reply_text(f"🔍 '{corp_name_query}' 검색 중...")
-    results = await corp_service.search_corps(corp_name_query)
-
-    if not results:
-        await update.message.reply_text(f"'{corp_name_query}'를 찾을 수 없습니다.")
-        return
-
-    context.user_data["search_results"] = {code: name for code, name in results}
-    pending_selections[chat_id] = {}
-    reply_markup = build_add_keyboard(results, {})
     await update.message.reply_text(
-        f"🔍 '{corp_name_query}' 검색 결과입니다.\n등록할 기업을 선택하고 완료 버튼을 눌러주세요.",
-        reply_markup=reply_markup,
+        f"🔍 '{terms[0]}' 검색 중..." if len(terms) == 1
+        else f"🔍 기업 {len(terms)}곳 검색 중..."
+    )
+    result = await corp_service.search_corps_multi(terms)
+
+    if not result.items:
+        await update.message.reply_text(
+            "찾을 수 없습니다: " + ", ".join(result.not_found)
+            + "\n정식 상장사명으로 다시 시도해주세요. (예: /add 삼성전자)"
+        )
+        return
+
+    context.user_data["search_results"] = {code: name for code, name in result.items}
+    pending_selections[chat_id] = dict(result.preselected)
+
+    lines = [
+        f"🔍 '{terms[0]}' 검색 결과 {len(result.items)}곳" if len(terms) == 1
+        else f"🔍 검색어 {len(terms)}개 · 결과 {len(result.items)}곳"
+    ]
+    if result.preselected:
+        lines.append(f"✅ 이름이 정확히 일치한 {len(result.preselected)}곳은 미리 선택했습니다.")
+    if result.not_found:
+        # 못 찾은 검색어를 조용히 버리면 등록된 줄 안다 — 반드시 드러낸다
+        lines.append("❌ 못 찾음: " + ", ".join(result.not_found))
+    if result.truncated:
+        lines.append(f"(결과가 많아 {len(result.items)}곳까지만 표시합니다)")
+    lines.append("확인 후 '등록 완료'를 눌러주세요.")
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        reply_markup=build_add_keyboard(result.items, pending_selections[chat_id]),
     )
 
 
 async def toggle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     chat_id = str(query.from_user.id)
-    _, corp_code, corp_name = query.data.split(":", 2)
-
-    if chat_id not in pending_selections:
-        pending_selections[chat_id] = {}
-    if corp_code in pending_selections[chat_id]:
-        del pending_selections[chat_id][corp_code]
-    else:
-        pending_selections[chat_id][corp_code] = corp_name
+    corp_code = query.data.split(":", 1)[1]
 
     search_results = context.user_data.get("search_results", {})
-    results = list(search_results.items())
-    reply_markup = build_add_keyboard([(c, n) for c, n in results], pending_selections[chat_id])
-    await query.edit_message_reply_markup(reply_markup=reply_markup)
+    corp_name = search_results.get(corp_code)
+    if corp_name is None:
+        # 봇 재시작 등으로 검색 목록이 사라진 경우. 조용히 빈 키보드를 그리면
+        # 사용자는 버튼이 왜 사라졌는지 알 수 없다.
+        await query.answer("검색 목록이 만료되었습니다. /add 로 다시 검색해주세요.",
+                           show_alert=True)
+        return
+
+    await query.answer()
+    selected = pending_selections.setdefault(chat_id, {})
+    if corp_code in selected:
+        del selected[corp_code]
+    else:
+        selected[corp_code] = corp_name
+
+    await query.edit_message_reply_markup(
+        reply_markup=build_add_keyboard(list(search_results.items()), selected)
+    )
 
 
 async def confirm_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -314,6 +364,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 forG 사용법\n\n"
         "■ 관심기업\n"
         "/add 기업명 - 관심기업 등록 (예: /add 삼성전자)\n"
+        "/add 기업1, 기업2, 기업3 - 쉼표·줄바꿈으로 여러 곳 한 번에 등록\n"
+        "   (이름이 정확히 일치하면 미리 선택되므로 '등록 완료'만 누르면 됩니다)\n"
         "/remove 기업명 - 관심기업 삭제\n"
         "/list - 등록된 기업 목록\n\n"
         "■ 공시 조회\n"
