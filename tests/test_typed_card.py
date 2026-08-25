@@ -3,7 +3,7 @@
   1. CB D-day: 'D+'(경과) 오표기 → 미래는 'D-n', 당일 'D-Day', 과거는 생략
   2. 유상증자: 증자방식 실제 키(ic_mthn) 미조회 → 카드 공백 → '미제공' 서술 유발
   3. 자기주식 처분: dppln_* 필드 전체 누락 (씨젠 사례)
-  4. 합병: mgptncmp_cmpnm/mgsc_mgdt/rs_sm_atn 미조회 → 소규모합병 주총 오서술 유발
+  4. 합병: mgptncmp_cmpnm/mgsc_mgdt 미조회 + rs_sm_atn 주총 오표기(홀드아웃에서 확인)
 """
 import datetime
 import os
@@ -75,14 +75,64 @@ mg = format_typed_disclosure("한국카본", "주요사항보고서(회사합병
     "nmgcmp_rlst_atn": "해당사항없음",
     "mg_rt": "(주)한국카본 : (주)한국글로벌솔루션\n= 1.0000000 : 0.00",
     "mgsc_mgdt": "2026년 11월 02일",
-    "rs_sm_atn": "아니오",
+    "mg_stn": "소규모합병",
+    "mgsc_gmtsck_prd": "-",          # 소규모합병이라 주총 없음
+    "rs_sm_atn": "예",               # 주총과 무관한 필드 (아래 회귀 방지)
 }, today=TODAY)
 check("합병상대(mgptncmp_cmpnm) 표기", "한국글로벌솔루션" in mg)
 check("관계는 mgptncmp_rl_cmpn(자회사) — r2 오표기 회귀 방지", "상대법인과의 관계: 자회사" in mg)
 check("다른 의미의 필드(해당사항없음)를 관계로 쓰지 않음", "해당사항없음" not in mg)
 check("합병기일(mgsc_mgdt) 표기", "2026년 11월 02일" in mg)
-check("주총 소집 여부 명시(오서술 방지 근거)", "주주총회 소집 여부: 아니오" in mg)
+# 2026-08-26 홀드아웃 평가: rs_sm_atn을 '주주총회 소집 여부'로 쓰던 것은 오표기였다.
+# 실측상 rs_sm_atn='예'인데 주총이 없는 소규모합병(SK이노베이션)과 '아니오'인데 주총이
+# 있는 건(SK아이이테크놀로지)이 공존한다 — 상관관계 자체가 없다.
+check("rs_sm_atn을 주총 소집 여부로 쓰지 않음", "주주총회 소집 여부" not in mg)
+check("뜻 모를 필드값을 그대로 노출하지 않음", "rs_sm_atn" not in mg)
+check("합병 형태(mg_stn) 표기 — 주총이 없는 이유가 드러남", "합병 형태: 소규모합병" in mg)
+check("주총 예정일이 '-'면 표기하지 않음", "주주총회 예정일" not in mg)
+
+# 주총이 실제로 있는 합병은 날짜로 표기된다
+mg2 = format_typed_disclosure("에어부산", "주요사항보고서(회사합병결정)", {
+    "mgptncmp_cmpnm": "(주)진에어",
+    "mgsc_gmtsck_prd": "2026년 12월 07일",
+    "mg_stn": "해당사항없음",
+    "rs_sm_atn": "아니오",
+}, today=TODAY)
+check("주총 예정일(mgsc_gmtsck_prd) 표기", "주주총회 예정일: 2026년 12월 07일" in mg2)
+check("합병 형태 '해당사항없음'은 표기 생략", "합병 형태" not in mg2)
 check("합병비율 개행 정리", "\n= 1" not in mg)
+
+# ── 💡 코멘트 숫자 가드 (2026-08-26 홀드아웃) ────────────────────────
+# 카드 수치는 정형 API에서 오므로 늘 옳다. 위험한 건 그것을 다시 말하는 코멘트로,
+# 홀드아웃에서 300억을 30조로 옮겨 적은 1000배 오기가 실제로 나왔다. LLM 출력은
+# 확률적이라 "이번엔 안 틀렸다"로는 검증이 안 되므로, 코멘트를 주입해 결정론적으로
+# 확인한다.
+import asyncio  # noqa: E402
+import summarizer  # noqa: E402
+
+CB = {"bd_fta": "62,500,000,000", "fdpp_op": "30,000,000,000",
+      "cv_prc": "33,255", "bd_mtd": "2056년 09월 04일"}
+
+
+async def _summary_with_comment(comment):
+    async def fake(prompt):
+        return comment
+    orig = summarizer._generate_with_fallback
+    summarizer._generate_with_fallback = fake
+    try:
+        return await summarizer.summarize_typed_disclosure(
+            "서진시스템", "주요사항보고서(전환사채권발행결정)", CB)
+    finally:
+        summarizer._generate_with_fallback = orig
+
+
+bad = asyncio.run(_summary_with_comment("자금목적은 30,000,000,000,000원입니다."))
+check("근거 없는 대형 금액이 든 코멘트는 폐기", "30,000,000,000,000" not in bad)
+check("코멘트를 버려도 카드는 그대로 발송", "62,500,000,000원" in bad)
+check("폐기 시 💡 블록 자체가 없음", "💡" not in bad)
+
+good = asyncio.run(_summary_with_comment("자금목적(운영)은 30,000,000,000원입니다."))
+check("정형 근거가 있는 코멘트는 유지", "💡" in good and "30,000,000,000원" in good)
 
 if failures:
     print(f"\n{len(failures)}건 실패: {failures}")
