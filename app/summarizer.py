@@ -298,6 +298,26 @@ async def summarize_disclosure(
 
     return "요약 생성에 실패했습니다. DART에서 직접 확인해주세요."
 
+def _one_line(value) -> str:
+    """DART 원문 값의 줄바꿈·연속 공백을 한 줄로 정리한다(카드 가독성)."""
+    return " ".join(str(value).split())
+
+
+# 여러 정형 API가 공유하는 공통 필드. 뜻은 2026-08-21 카카오 회사분할결정
+# 실응답의 값으로 확인했다(§4.2). 여기 없는 키는 카드에 절대 노출하지 않는다.
+_COMMON_FIELD_LABELS = {
+    'bddd': '이사회결의일',
+    'gmtsck_prd': '주주총회 예정일',
+    'rs_sm_atn': '주주총회 소집 여부',
+    'ffdtl_tast': '자산총계',
+    'ffdtl_tdbt': '부채총계',
+    'ffdtl_teqt': '자본총계',
+    'ffdtl_cpt': '자본금',
+    'ffdtl_std': '재무 기준일',
+    'popt_ctr_atn': '풋옵션 등 계약 체결 여부',
+}
+
+
 def format_typed_disclosure(corp_name: str, report_nm: str, data: dict, today=None) -> str:
     """정형 데이터를 카드 뷰 형식으로 포맷팅.
 
@@ -381,6 +401,44 @@ def format_typed_disclosure(corp_name: str, report_nm: str, data: dict, today=No
             lines.append(f"• 주주총회 소집 여부: {data['rs_sm_atn']}")
         if data.get('mgr_nstk_ismt_atn'): lines.append(f"• 신주발행: {data['mgr_nstk_ismt_atn']}")
 
+    elif '분할' in report_nm:
+        lines.append("[분할 결정]")
+        # 필드명은 2026-08-21 카카오 '주요사항보고서(회사분할결정)' 실응답으로 검증했다
+        # (§4.2 — 추측 금지). 이 유형에 분기가 없어 raw 키(bddd·od_a_at_t…)가 그대로
+        # 사용자에게 나가던 것을 실사용자 피드백으로 확인하고 추가한 것이다.
+        if data.get('dvfcmp_cmpnm'):
+            lines.append(f"• 분할신설회사: {_one_line(data['dvfcmp_cmpnm'])}")
+        if data.get('dvfcmp_mbsn') and data['dvfcmp_mbsn'] != '-':
+            lines.append(f"• 신설회사 주요사업: {_one_line(data['dvfcmp_mbsn'])}")
+        if data.get('dvfcmp_rlst_atn') and data['dvfcmp_rlst_atn'] != '-':
+            lines.append(f"• 신설회사 재상장 예정: {data['dvfcmp_rlst_atn']}")
+        if data.get('atdv_excmp_cmpnm'):
+            lines.append(f"• 분할존속회사: {_one_line(data['atdv_excmp_cmpnm'])}")
+        if data.get('atdv_excmp_mbsn') and data['atdv_excmp_mbsn'] != '-':
+            lines.append(f"• 존속회사 주요사업: {_one_line(data['atdv_excmp_mbsn'])}")
+        if data.get('atdv_excmp_atdv_lstmn_atn') and data['atdv_excmp_atdv_lstmn_atn'] != '-':
+            lines.append(f"• 존속회사 상장 유지: {data['atdv_excmp_atdv_lstmn_atn']}")
+        # 값은 원문 그대로 둔다 — 단위(%)를 임의로 붙이지 않는다
+        if data.get('abcr_crrt') and data['abcr_crrt'] != '-':
+            lines.append(f"• 분할비율: {data['abcr_crrt']}")
+        if data.get('dvdt') and data['dvdt'] != '-':
+            lines.append(f"• 분할기일: {data['dvdt']}")
+        if data.get('gmtsck_prd') and data['gmtsck_prd'] != '-':
+            lines.append(f"• 주주총회 예정일: {data['gmtsck_prd']}")
+        if data.get('abcr_nstkasstd') and data['abcr_nstkasstd'] != '-':
+            lines.append(f"• 신주배정 기준일: {data['abcr_nstkasstd']}")
+        # 매매거래 정지 예정기간 — 커버리지 담당자에게 가장 실무적인 항목
+        bgd = data.get('abcr_trspprpd_bgd')
+        edd = data.get('abcr_trspprpd_edd')
+        if bgd and bgd != '-':
+            lines.append(f"• 매매거래 정지 예정: {bgd} ~ {edd if edd and edd != '-' else '미정'}")
+        if data.get('abcr_nstklstprd') and data['abcr_nstklstprd'] != '-':
+            lines.append(f"• 신주 상장 예정일: {data['abcr_nstklstprd']}")
+        if data.get('dvrgsprd') and data['dvrgsprd'] != '-':
+            lines.append(f"• 분할등기 예정일: {data['dvrgsprd']}")
+        if data.get('bddd') and data['bddd'] != '-':
+            lines.append(f"• 이사회결의일: {data['bddd']}")
+
     elif '자기주식' in report_nm:
         if '취득' in report_nm:
             lines.append("[자기주식 취득 결정]")
@@ -400,10 +458,18 @@ def format_typed_disclosure(corp_name: str, report_nm: str, data: dict, today=No
             if data.get('dpprpd_bgd'): lines.append(f"• 처분기간: {data['dpprpd_bgd']} ~ {data.get('dpprpd_edd', '')}")
 
     else:
-        # 기타 유형은 데이터 그대로
-        for k, v in data.items():
-            if v and v != '-' and k not in ['rcept_no', 'corp_cls', 'corp_code', 'corp_name']:
-                lines.append(f"• {k}: {v}")
+        # 분기가 없는 유형. 예전에는 data를 그대로 찍어 raw 필드명(bddd·od_a_at_t·
+        # rs_sm_atn…)이 사용자에게 나갔다 — 실사용자가 "요약이 잘못됨"으로 신고한
+        # 결함이다. 이제 뜻이 검증된 공통 필드만 한글 라벨로 보여주고, 모르는 키는
+        # 아예 표시하지 않는다. 값을 못 보여주는 것이 뜻 모를 코드를 보여주는 것보다 낫다.
+        shown = 0
+        for key, label in _COMMON_FIELD_LABELS.items():
+            v = data.get(key)
+            if v and str(v) != '-':
+                lines.append(f"• {label}: {_one_line(v)}")
+                shown += 1
+        if not shown:
+            lines.append("• 정형 항목을 표시할 수 없는 유형입니다 — 원문을 확인해주세요.")
 
     return chr(10).join(lines)
 
