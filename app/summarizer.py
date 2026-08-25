@@ -308,7 +308,6 @@ def _one_line(value) -> str:
 _COMMON_FIELD_LABELS = {
     'bddd': '이사회결의일',
     'gmtsck_prd': '주주총회 예정일',
-    'rs_sm_atn': '주주총회 소집 여부',
     'ffdtl_tast': '자산총계',
     'ffdtl_tdbt': '부채총계',
     'ffdtl_teqt': '자본총계',
@@ -397,8 +396,16 @@ def format_typed_disclosure(corp_name: str, report_nm: str, data: dict, today=No
             lines.append(f"• 합병비율: {' '.join(str(data['mg_rt']).split())}")  # 원문 개행 정리
         mgdt = data.get('mgsc_mgdt') or data.get('mgdt')
         if mgdt: lines.append(f"• 합병기일: {mgdt}")
-        if data.get('rs_sm_atn'):
-            lines.append(f"• 주주총회 소집 여부: {data['rs_sm_atn']}")
+        # rs_sm_atn을 '주주총회 소집 여부'로 쓰던 것은 오표기였다(2026-08-26 홀드아웃
+        # 평가). 같은 셋 28건에서 SK이노베이션은 rs_sm_atn='예'인데 주총이 없고
+        # (소규모합병), SK아이이테크놀로지는 '아니오'인데 주총이 있다 — 이 필드는
+        # 주총과 무관하다. 뜻을 단정할 수 없으므로 표시하지 않고, 주총은 날짜 필드로
+        # 명확히 드러낸다.
+        if data.get('mg_stn') and data['mg_stn'] not in ('-', '해당사항없음'):
+            lines.append(f"• 합병 형태: {data['mg_stn']}")
+        gm = data.get('mgsc_gmtsck_prd')
+        if gm and gm != '-':
+            lines.append(f"• 주주총회 예정일: {gm}")
         if data.get('mgr_nstk_ismt_atn'): lines.append(f"• 신주발행: {data['mgr_nstk_ismt_atn']}")
 
     elif '분할' in report_nm:
@@ -511,6 +518,16 @@ async def summarize_typed_disclosure(
     # 알림 경로와 동일한 폴백 체인을 태워 주력 프로바이더 장애 시에도 유지한다.
     ai_comment = await _generate_with_fallback(prompt)
 
-    if ai_comment:
-        return card + chr(10) + chr(10) + "💡 " + ai_comment.strip()
-    return card
+    if not ai_comment:
+        return card
+
+    # 카드 수치는 정형 API에서 왔으니 늘 옳다. 위험한 건 그것을 '다시 말하는'
+    # 코멘트다 — 홀드아웃 평가에서 300억(30,000,000,000)을 30조로 옮겨 적은
+    # 1000배 오기가 나왔다. 정형 응답에 근거가 없는 대형 금액이 코멘트에 있으면
+    # 코멘트를 버린다. 카드만 보내는 편이 틀린 숫자를 덧붙이는 것보다 낫다.
+    from verification.checks import cross_check_amounts
+    ungrounded = cross_check_amounts(ai_comment, data)["unverified_large"]
+    if ungrounded:
+        print(f"💡 코멘트 폐기 — 정형 근거 없는 금액: {[str(x) for x in ungrounded[:3]]}")
+        return card
+    return card + chr(10) + chr(10) + "💡 " + ai_comment.strip()
