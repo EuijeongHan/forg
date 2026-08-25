@@ -210,18 +210,49 @@ async def list_corps(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 PAGE_SIZE = 20
 
+# 조회 결과의 페이지 상태 (chat_id -> {"items", "header"}). 프로세스 메모리라
+# 재시작 시 사라진다 — disclosure_cache와 같은 제약(§6-4).
+result_pages: dict[str, dict] = {}
 
-def _disclosure_keyboard(disclosures: list[dict]):
-    # 텔레그램 인라인 키보드 한도와 가독성 때문에 한 번에 PAGE_SIZE건만 보여준다.
-    # 잘린 사실은 호출자가 문구로 알려준다 — 조용히 자르면 사용자는 나머지 공시가
-    # 존재하는지조차 모른다.
-    return InlineKeyboardMarkup([
+
+def _disclosure_keyboard(disclosures: list[dict], offset: int = 0):
+    """한 페이지(PAGE_SIZE건)와 이전/다음 버튼.
+
+    예전에는 앞 20건만 그리고 끝이라, 중요 공시가 259건인 날에 232번째로 접수된
+    공시는 아무리 해도 볼 수 없었다(실사용자가 "카카오가 왜 없냐"고 신고). 이제
+    나머지도 버튼으로 도달한다.
+    """
+    page = disclosures[offset:offset + PAGE_SIZE]
+    rows = [
         [InlineKeyboardButton(
             f"{d['corp_name']} | {d['report_nm'][:20]}",
             callback_data=f"view:{d['rcept_no']}"
         )]
-        for d in disclosures[:PAGE_SIZE]
-    ])
+        for d in page
+    ]
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("◀ 이전", callback_data=f"page:{offset - PAGE_SIZE}"))
+    remaining = len(disclosures) - offset - PAGE_SIZE
+    if remaining > 0:
+        nav.append(InlineKeyboardButton(
+            f"다음 {min(PAGE_SIZE, remaining)}건 ▶", callback_data=f"page:{offset + PAGE_SIZE}"
+        ))
+    if nav:
+        rows.append(nav)
+    return InlineKeyboardMarkup(rows)
+
+
+def _page_text(header: str, total: int, offset: int) -> str:
+    lines = [header]
+    if total > PAGE_SIZE:
+        last = min(offset + PAGE_SIZE, total)
+        lines.append(
+            f"{offset + 1}–{last}번째 표시 · 버튼으로 넘기거나 검색어로 좁히세요"
+            " (예: /market 카카오)"
+        )
+    lines.append("공시를 선택하면 요약을 보여드립니다.")
+    return "\n".join(lines)
 
 
 async def _send_query_result(update, result, empty_hint: str = ""):
@@ -242,11 +273,12 @@ async def _send_query_result(update, result, empty_hint: str = ""):
     for d in result.items:
         disclosure_cache[d["rcept_no"]] = d
 
-    shown = min(len(result.items), PAGE_SIZE)
-    text = result.header() + "\n공시를 선택하면 요약을 보여드립니다."
-    if len(result.items) > PAGE_SIZE:
-        text += f"\n(최근 {shown}건 표시 — 검색어를 붙이면 좁힐 수 있습니다. 예: /my 유상증자)"
-    await update.message.reply_text(text, reply_markup=_disclosure_keyboard(result.items))
+    chat_id = str(update.effective_chat.id)
+    result_pages[chat_id] = {"items": result.items, "header": result.header()}
+    await update.message.reply_text(
+        _page_text(result.header(), len(result.items), 0),
+        reply_markup=_disclosure_keyboard(result.items, 0),
+    )
 
 
 async def my_disclosures(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -308,6 +340,25 @@ async def legacy_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """구 명령(/today·/mytoday) — /my의 조용한 별칭. 깨뜨리지 않고 안내만 한다."""
     await update.message.reply_text("이 명령은 /my 로 이름이 바뀌었습니다. 이번엔 그대로 조회해드릴게요.")
     await my_disclosures(update, context)
+
+
+async def page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """조회 결과 페이지 이동. 목록은 프로세스 메모리라 재시작 시 만료된다."""
+    query = update.callback_query
+    chat_id = str(query.from_user.id)
+    state = result_pages.get(chat_id)
+    if not state:
+        await query.answer("목록이 만료되었습니다. 다시 조회해주세요.", show_alert=True)
+        return
+
+    await query.answer()
+    items = state["items"]
+    offset = int(query.data.split(":", 1)[1])
+    offset = max(0, min(offset, max(0, (len(items) - 1) // PAGE_SIZE * PAGE_SIZE)))
+    await query.edit_message_text(
+        _page_text(state["header"], len(items), offset),
+        reply_markup=_disclosure_keyboard(items, offset),
+    )
 
 
 async def view_disclosure_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -570,5 +621,6 @@ def create_bot_app() -> Application:
     app.add_handler(CallbackQueryHandler(confirm_add_callback, pattern="^confirm_add$"))
     app.add_handler(CallbackQueryHandler(remove_callback, pattern="^remove:"))
     app.add_handler(CallbackQueryHandler(view_disclosure_callback, pattern="^view:"))
+    app.add_handler(CallbackQueryHandler(page_callback, pattern="^page:"))
     app.add_handler(CallbackQueryHandler(toggle_sync_callback, pattern="^toggle_sync$"))
     return app
