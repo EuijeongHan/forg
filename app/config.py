@@ -6,6 +6,12 @@ load_dotenv()
 DART_API_KEY = os.getenv("DART_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# 운영자의 '개인' 채팅 ID(쉼표 구분). TELEGRAM_CHAT_ID는 운영 알림 채널이라
+# 봇과 1:1 대화를 하는 주체와 다르다 — /inbox 같은 운영 명령의 권한 판정용.
+# 미설정이면 TELEGRAM_CHAT_ID를 쓴다(채널 분리 전 구성과 호환).
+OPERATOR_CHAT_IDS = [
+    x.strip() for x in (os.getenv("OPERATOR_CHAT_IDS") or "").split(",") if x.strip()
+] or ([TELEGRAM_CHAT_ID] if TELEGRAM_CHAT_ID else [])
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 

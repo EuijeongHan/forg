@@ -6,7 +6,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI
 from database import init_db
-from tasks import process_disclosures, run_llm_canary, send_daily_digest
+from tasks import (process_disclosures, remind_open_feedback, run_llm_canary,
+                   send_daily_digest)
 from bot import create_bot_app
 from config import POLLING_INTERVAL, TELEGRAM_CHAT_ID
 from notifier import send_system_message
@@ -93,6 +94,15 @@ async def lifespan(app: FastAPI):
         max_instances=1,
         coalesce=True,
         next_run_time=datetime.now(timezone.utc) + timedelta(seconds=90),
+    )
+    # 미처리 사용자 요청 상기 — 09:00 KST(하루를 시작할 때). 사용자 요청은
+    # 1순위이므로 남아 있으면 매일 다시 알린다.
+    scheduler.add_job(
+        remind_open_feedback,
+        CronTrigger(hour=9, minute=0, timezone=_KST),
+        id="feedback_reminder",
+        max_instances=1,
+        coalesce=True,
     )
     scheduler.start()
     print(f"DART 폴링 시작 (주기: {POLLING_INTERVAL}초) + 다이제스트 18:30 KST")

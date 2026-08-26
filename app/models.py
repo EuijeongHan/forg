@@ -142,6 +142,9 @@ class Feedback(Base):
     id = Column(String, primary_key=True, default=gen_uuid)
     chat_id = Column(String, ForeignKey("users.chat_id"), nullable=False, index=True)
     text = Column(Text, nullable=False)
+    # new | done — 미처리를 드러내기 위한 것. 사용자 요청이 조용히 묻히는 것을
+    # 막는 장치이므로 기본값은 항상 'new'다(마이그레이션 0004).
+    status = Column(String, nullable=False, default="new", index=True)
     created_at = Column(DateTime(timezone=True), default=now_utc)
 
 
