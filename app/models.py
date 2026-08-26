@@ -114,6 +114,22 @@ class DisclosureEvent(Base):
     updated_at = Column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
 
 
+class TopicSubscription(Base):
+    """시장 전체 유형 구독 — 워치리스트와 독립적으로 '어떤 유형'을 받을지.
+
+    신규 테이블이므로 create_all이 생성한다(disclosure_events·feedback과 동일 관례).
+    """
+    __tablename__ = "topic_subscriptions"
+    __table_args__ = (
+        UniqueConstraint("chat_id", "topic", name="uq_topic_sub_chat_topic"),
+    )
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    chat_id = Column(String, ForeignKey("users.chat_id"), nullable=False, index=True)
+    topic = Column(String, nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=now_utc)
+
+
 class Feedback(Base):
     """사용자 피드백 (/feedback) — 목적함수(놓침 0)의 실측 데이터 수집 경로.
 

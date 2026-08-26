@@ -7,7 +7,9 @@ moving them to shared storage is a later SaaS-transition task).
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from config import TELEGRAM_BOT_TOKEN
-from services import corp_service, disclosure_service, feedback_service, query_service, user_service, watchlist_service
+from services import (corp_service, disclosure_service, feedback_service, query_service,
+                      subscription_service, user_service, watchlist_service)
+from topics import TOPICS
 
 pending_selections: dict[str, dict[str, str]] = {}
 disclosure_cache: dict[str, dict] = {}
@@ -53,6 +55,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/market - 전체 시장 오늘 공시\n"
         "/ask 질문 - 자연어 공시 검색 (베타)\n"
         "/list - 등록된 기업 목록\n"
+        "/topic - 유형 구독 (관심기업 무관, 예: 공급계약)\n"
         "/feedback 내용 - 오류·개선 신고\n"
         "/help - 전체 사용법\n\n"
         "ℹ️ forG는 DART 공시를 AI로 요약해 전달하는 참고용 도구입니다.\n"
@@ -436,6 +439,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 시장 공지 - 상장폐지 우려·심사, 거래정지 발생 등 예고 단계도 시장 전체에 즉시 알림\n"
         "⚠️ 중요 - 관심기업의 증자·CB·실적·5%지분·내부자매매·배당 등 즉시 알림\n"
         "📄 참고 - 관심기업의 그 외 공시(정기보고서·IR 등)는 매일 18:30 묶음 전달\n\n"
+        "■ 유형 구독\n"
+        "/topic - 특정 공시 유형을 관심기업과 무관하게 시장 전체에서 받기\n"
+        "   (단일판매·공급계약체결 등 — 커버리지 밖 기업 건도 신호가 되는 유형)\n\n"
         "■ 기타\n"
         "/feedback 내용 - 오류·불편 신고 (특히 '와야 할 알림이 안 온 경우' 제보가 가장 큰 도움이 됩니다)\n"
         "/settings - 설정\n"
@@ -450,9 +456,12 @@ async def _settings_text(chat_id: str) -> str:
     """현재 상태 요약. 키워드 동기화 UI는 /keyword 폐기와 함께 제거했다
     (죽은 설정을 보여주면 사용자가 켜고 끄며 의미를 찾게 된다)."""
     watchlist = await watchlist_service.list_watchlist(chat_id)
+    subs = await subscription_service.list_topics(chat_id)
+    sub_text = ", ".join(TOPICS[k]["label"] for k in subs if k in TOPICS) or "없음"
     return (
         "⚙️ 설정\n\n"
-        f"📋 관심기업: {len(watchlist)}곳 (/list 로 확인, /add 로 추가)\n\n"
+        f"📋 관심기업: {len(watchlist)}곳 (/list 로 확인, /add 로 추가)\n"
+        f"📑 유형 구독: {sub_text} (/topic 으로 변경)\n\n"
         "🔔 알림은 자동입니다 — 별도 설정이 없습니다.\n"
         "  🚨 긴급 — 시장 전체 중대 공시(확정), 항상 켜짐\n"
         "  📌 시장 공지 — 시장 전체 예고 단계(상폐 우려·거래정지 등)\n"
@@ -518,6 +527,55 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(answer, disable_web_page_preview=True)
 
 
+def _topic_keyboard(subscribed: set[str]):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            ("✅ " if key in subscribed else "⬜ ") + spec["label"],
+            callback_data=f"topic:{key}",
+        )]
+        for key, spec in TOPICS.items()
+    ])
+
+
+def _topic_text(subscribed: set[str]) -> str:
+    lines = ["📑 유형 구독",
+             "관심기업으로 등록하지 않은 기업의 공시도, 구독한 유형이면 받아봅니다.", ""]
+    for key, spec in TOPICS.items():
+        mark = "✅ 구독 중" if key in subscribed else "⬜ 미구독"
+        lines.append(f"{mark} · {spec['label']}")
+        lines.append(f"   {spec['desc']}")
+    lines.append("")
+    lines.append("버튼을 눌러 켜고 끕니다.")
+    return "\n".join(lines)
+
+
+async def topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """유형 구독 관리 — 워치리스트와 무관하게 특정 공시 유형을 시장 전체에서 받는다."""
+    chat_id = str(update.effective_chat.id)
+    subscribed = await subscription_service.list_topics(chat_id)
+    await update.message.reply_text(
+        _topic_text(subscribed), reply_markup=_topic_keyboard(subscribed)
+    )
+
+
+async def topic_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    chat_id = str(query.from_user.id)
+    first_name = query.from_user.first_name or ""
+    key = query.data.split(":", 1)[1]
+
+    if key not in TOPICS:
+        await query.answer("알 수 없는 유형입니다.", show_alert=True)
+        return
+
+    on = await subscription_service.toggle_topic(chat_id, first_name, key)
+    await query.answer("구독을 켰습니다." if on else "구독을 껐습니다.")
+    subscribed = await subscription_service.list_topics(chat_id)
+    await query.edit_message_text(
+        _topic_text(subscribed), reply_markup=_topic_keyboard(subscribed)
+    )
+
+
 async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """피드백 접수 — DB 저장 후 운영자에게 즉시 전달한다.
 
@@ -568,7 +626,7 @@ async def deletedata(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
     await update.message.reply_text(
         "내 데이터를 모두 삭제합니다.\n\n"
-        "삭제 대상: 관심기업 목록, 알림 발송 기록, 피드백, 계정 정보\n"
+        "삭제 대상: 관심기업 목록, 유형 구독, 알림 발송 기록, 피드백, 계정 정보\n"
         "삭제하면 알림이 중단되고 되돌릴 수 없습니다. 다시 쓰려면 /start 로 처음부터 등록해야 합니다.",
         reply_markup=keyboard,
     )
@@ -585,8 +643,9 @@ async def confirm_delete_callback(update: Update, context: ContextTypes.DEFAULT_
     pending_selections.pop(chat_id, None)
     await query.edit_message_text(
         "삭제를 완료했습니다.\n"
-        f"관심기업 {counts['watchlist']}건, 발송 기록 {counts['seen']}건, "
-        f"피드백 {counts.get('feedback', 0)}건, 계정 {counts['user']}건\n\n"
+        f"관심기업 {counts['watchlist']}건, 유형 구독 {counts.get('topics', 0)}건, "
+        f"발송 기록 {counts['seen']}건, 피드백 {counts.get('feedback', 0)}건, "
+        f"계정 {counts['user']}건\n\n"
         "다시 이용하시려면 /start 를 입력해주세요."
     )
 
@@ -608,6 +667,7 @@ def create_bot_app() -> Application:
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("ask", ask))
     app.add_handler(CommandHandler("feedback", feedback))
+    app.add_handler(CommandHandler("topic", topic))
     # 구 명령 별칭 — 기존 사용자의 손버릇을 깨지 않는다
     app.add_handler(CommandHandler("today", legacy_today))
     app.add_handler(CommandHandler("mytoday", legacy_today))
@@ -622,5 +682,6 @@ def create_bot_app() -> Application:
     app.add_handler(CallbackQueryHandler(remove_callback, pattern="^remove:"))
     app.add_handler(CallbackQueryHandler(view_disclosure_callback, pattern="^view:"))
     app.add_handler(CallbackQueryHandler(page_callback, pattern="^page:"))
+    app.add_handler(CallbackQueryHandler(topic_callback, pattern="^topic:"))
     app.add_handler(CallbackQueryHandler(toggle_sync_callback, pattern="^toggle_sync$"))
     return app
