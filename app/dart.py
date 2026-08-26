@@ -190,23 +190,61 @@ async def fetch_today_disclosures_from_db(important_only: bool = False) -> list[
         ]
 
 
+# 뷰어 호출 파라미터는 main.do가 심어 둔 viewDoc(...) 호출에서 그대로 읽는다.
+# 주요사항보고서는 node1['dcmNo'] 블록도 갖지만 거래소 소관 공시(단일판매·공급계약
+# 체결 등, 접수번호 …8xxxxx)는 그 블록이 아예 없다. viewDoc 인자는 두 유형 모두에
+# 있고 dtd까지 함께 알려준다 — dart4.xsd로 하드코딩하면 거래소 공시는 빈손이 된다.
+_VIEW_DOC_RE = re.compile(
+    r'viewDoc\(\s*"(\d+)"\s*,\s*"(\d+)"\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"'
+    r'\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"'
+)
+
+
+def _decode(response) -> str:
+    """DART 응답 디코딩. 거래소 뷰어는 MS949(=cp949)로 내려온다.
+
+    utf-8로 강제하면 한글이 전부 깨져 숫자만 남는다 — 요약이 '정보 없음'으로
+    나오던 원인 중 하나였다(2026-08-26 사용자 신고).
+    """
+    raw = response.content
+    encodings = []
+    ctype = response.headers.get("content-type", "")
+    m = re.search(r"charset=([\w-]+)", ctype, re.I)
+    if m:
+        encodings.append(m.group(1))
+    encodings += ["utf-8", "cp949"]
+    for enc in encodings:
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", "ignore")
+
+
 async def fetch_disclosure_detail(receipt_no: str) -> str:
     try:
         main_url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt_no}"
         async with httpx.AsyncClient(follow_redirects=True) as client:
             r = await client.get(main_url, timeout=10)
-            dcm_nos = re.findall(r"node1\['dcmNo'\]\s*=\s*\"(\d+)\"", r.text)
-            if not dcm_nos:
-                dcm_nos = re.findall(r"dcmNo[=:\"']+(\d+)", r.text)
-            if not dcm_nos:
-                return ""
-            dcm_no = dcm_nos[0]
+            m = _VIEW_DOC_RE.search(_decode(r))
+            if m:
+                _, dcm_no, ele_id, offset, length, dtd = m.groups()
+            else:
+                # 구 경로 폴백 — viewDoc이 없는 형식이 있을 수 있다
+                dcm_nos = re.findall(r"node1\['dcmNo'\]\s*=\s*\"(\d+)\"", _decode(r))
+                if not dcm_nos:
+                    print(f"공시 원문 문서번호 없음: {receipt_no}")
+                    return ""
+                dcm_no, ele_id, offset, length, dtd = dcm_nos[0], "0", "0", "0", "dart4.xsd"
 
-        viewer_url = f"https://dart.fss.or.kr/report/viewer.do?rcpNo={receipt_no}&dcmNo={dcm_no}&eleId=0&offset=0&length=0&dtd=dart4.xsd"
+        viewer_url = (
+            f"https://dart.fss.or.kr/report/viewer.do?rcpNo={receipt_no}&dcmNo={dcm_no}"
+            f"&eleId={ele_id}&offset={offset}&length={length}&dtd={dtd}"
+        )
         async with httpx.AsyncClient(follow_redirects=True) as client:
             r = await client.get(viewer_url, timeout=15)
             parser = TextExtractor()
-            parser.feed(r.text)
+            parser.feed(_decode(r))
             text = " ".join(parser.text)
             return text[:5000]
     except Exception as e:
