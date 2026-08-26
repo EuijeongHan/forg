@@ -106,11 +106,11 @@ async def toggle_sync(chat_id: str) -> User | None:
 async def delete_user_data(chat_id: str) -> dict[str, int]:
     """개인정보처리방침이 보장한 삭제 요청 경로의 실제 구현.
 
-    이 사용자의 워치리스트·발송 기록·피드백·계정을 지운다. 되돌릴 수 없다.
+    이 사용자의 워치리스트·발송 기록·피드백·유형 구독·계정을 지운다. 되돌릴 수 없다.
     Disclosure(공시 원본)는 개인정보가 아니라 공개 공시 데이터이므로 남긴다.
     반환값은 삭제된 행 수 — 사용자에게 무엇이 지워졌는지 보여주기 위함이다.
     """
-    from models import Feedback, SeenDisclosure, Watchlist
+    from models import Feedback, SeenDisclosure, TopicSubscription, Watchlist
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -128,6 +128,11 @@ async def delete_user_data(chat_id: str) -> dict[str, int]:
         )
         feedbacks = result.scalars().all()
 
+        result = await session.execute(
+            select(TopicSubscription).where(TopicSubscription.chat_id == chat_id)
+        )
+        subs = result.scalars().all()
+
         result = await session.execute(select(User).where(User.chat_id == chat_id))
         user = result.scalar_one_or_none()
 
@@ -135,6 +140,7 @@ async def delete_user_data(chat_id: str) -> dict[str, int]:
             "watchlist": len(watchlists),
             "seen": len(seen),
             "feedback": len(feedbacks),
+            "topics": len(subs),
             "user": 1 if user else 0,
         }
 
@@ -143,6 +149,8 @@ async def delete_user_data(chat_id: str) -> dict[str, int]:
         for row in seen:
             await session.delete(row)
         for row in feedbacks:
+            await session.delete(row)
+        for row in subs:
             await session.delete(row)
         # 사용자 행은 워치리스트가 참조하므로 마지막에 지운다
         if user:

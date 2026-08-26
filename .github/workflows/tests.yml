@@ -61,6 +61,8 @@ jobs:
         run: python tests/test_multi_add.py
       - name: User-feedback fixes (split card labels, result pagination)
         run: python tests/test_user_feedback_fixes.py
+      - name: Topic subscription (market-wide type feeds, tier routing, deletion)
+        run: python tests/test_topic_subscription.py
 
   # 마이그레이션은 PostgreSQL 전용 DO 블록이라 SQLite 기반 행위 테스트로는 검증되지
   # 않는다. 실제 PostgreSQL에 올려 적용 가능 여부와 멱등성(두 번 실행)을 확인한다.

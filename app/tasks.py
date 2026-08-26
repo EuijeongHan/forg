@@ -10,6 +10,7 @@ from dart import fetch_recent_disclosures, is_important, fetch_disclosure_detail
 from summarizer import summarize_disclosure, summarize_typed_disclosure
 from notifier import send_alert, send_system_message
 from alert_tiers import classify_market_tier, sort_key
+from topics import match_topic
 
 _KST = ZoneInfo("Asia/Seoul")
 
@@ -146,7 +147,11 @@ async def _run_pipeline():
             # 등급 판정 — 시장 등급(urgent/notice)은 워치리스트 무관 발송,
             # important는 워치리스트 한정, 둘 다 아니면 참고(일일 다이제스트).
             market_tier = classify_market_tier(report_nm, disclosure.get("corp_cls"))
-            if not market_tier and not is_important(report_nm):
+            # 유형 구독(topic)은 워치리스트와 독립적인 축이다 — 구독자는 등록하지
+            # 않은 기업의 공시도 받는다(첫 사용자 요청: 공급계약은 커버리지 밖
+            # 기업 건이라도 밸류체인 신호).
+            topic = match_topic(report_nm)
+            if not market_tier and not is_important(report_nm) and not topic:
                 continue  # 참고 등급 — 버리는 게 아니라 send_daily_digest가 묶는다
 
             # 공시 한 건의 실패가 사이클 전체를 중단시키지 않게 격리한다.
@@ -154,20 +159,32 @@ async def _run_pipeline():
             # 모든 공시가 영구히 발송되지 않는다 — 누락 0을 목표로 하는 서비스에서
             # 가장 조용하고 위험한 실패다.
             try:
+                watchlist_ids: set[str] = set()
                 if market_tier:
                     # 시장 전체 등급: 모든 활성 사용자에게 발송 (기본 ON).
                     # 안전망 기능을 옵트인으로 두지 않는다 — 2026-08-16 결정.
                     result = await session.execute(
                         select(User).where(User.is_active == True)
                     )
+                    target_users = list(result.scalars().all())
                 else:
-                    result = await session.execute(
-                        select(User).join(Watchlist).where(
-                            Watchlist.corp_code == corp_code,
-                            User.is_active == True,
+                    target_users = []
+                    if is_important(report_nm):
+                        result = await session.execute(
+                            select(User).join(Watchlist).where(
+                                Watchlist.corp_code == corp_code,
+                                User.is_active == True,
+                            )
                         )
-                    )
-                target_users = result.scalars().all()
+                        target_users = list(result.scalars().all())
+                        watchlist_ids = {u.chat_id for u in target_users}
+                    if topic:
+                        from services.subscription_service import subscribers
+                        seen_ids = {u.chat_id for u in target_users}
+                        for u in await subscribers(session, topic):
+                            if u.chat_id not in seen_ids:
+                                seen_ids.add(u.chat_id)
+                                target_users.append(u)
 
                 if not target_users:
                     continue
@@ -218,13 +235,21 @@ async def _run_pipeline():
                 summary = summary + time_warning
 
                 for user in unseen_users:
+                    # 같은 공시라도 받는 이유가 다르면 머리말이 달라야 한다:
+                    # 워치리스트라서 받는 사람과 유형 구독이라 받는 사람.
+                    if market_tier:
+                        user_tier = market_tier
+                    elif user.chat_id in watchlist_ids:
+                        user_tier = "important"
+                    else:
+                        user_tier = "topic"
                     sent = await send_alert(
                         chat_id=user.chat_id,
                         corp_name=corp_name,
                         report_nm=report_nm,
                         receipt_no=receipt_no,
                         summary=summary,
-                        tier=market_tier or "important",
+                        tier=user_tier,
                     )
                     if not sent:
                         # 발송 실패 시 기록하지 않는다 → 다음 폴링에서 재시도
