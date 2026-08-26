@@ -15,14 +15,26 @@ TOPICS: dict[str, dict] = {
         # '[기재정정]…', '…(자율공시)', '…(자회사의 주요경영사항)' 형태가 섞인다.
         # 가운뎃점이 'ㆍ'(U+318D)라 이름 전체로 매칭하면 놓친다 — 조각으로 본다.
         "patterns": ("단일판매", "공급계약"),
+        # 이 유형을 '인용'만 하는 다른 공시가 있다 — 예: 거래정지 사유란에
+        # '단일판매공급계약'이 적힌 주권매매거래정지(2026-08-26 키이스트 실측).
+        # 구독자는 계약 공시를 원한 것이므로, 공시명이 이 유형으로 시작할 때만 잡는다.
+        "prefix": "단일판매",
         "desc": "매출 대비 일정 비율 이상 계약 체결 시 공시 (상장사 하루 평균 18건, 정정 포함)",
     },
 }
 
 
+# '[기재정정]', '[첨부정정]' 등 앞머리 태그를 떼야 유형명이 맨 앞에 온다.
+_TAG = __import__("re").compile(r"^\s*(?:\[[^\]]*\]\s*)+")
+
+
 def match_topic(report_nm: str) -> str | None:
     """공시명이 구독 가능한 토픽에 해당하면 그 키를 돌려준다."""
+    name = _TAG.sub("", report_nm or "").strip()
     for key, spec in TOPICS.items():
-        if any(p in report_nm for p in spec["patterns"]):
-            return key
+        if not any(p in name for p in spec["patterns"]):
+            continue
+        if spec.get("prefix") and not name.startswith(spec["prefix"]):
+            continue
+        return key
     return None

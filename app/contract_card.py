@@ -39,6 +39,12 @@ _BODY_ANCHOR = re.compile(r"1\s*\.\s*판매ㆍ공급계약")
 _CORRECTION_REASON = re.compile(r"정정사유\s*(.*?)(?=\s*\d+\s*\.\s*정정사항|\s*정정사항|$)", re.S)
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
+# '기타 투자판단…' 섹션은 첫 사용자가 네 번째로 요청한 '투자자 주요참고'다.
+# 대부분 정형 문구(재무제표 기준·VAT 별도)지만, 회당 단가·환율·분할계약 금액·
+# 상대방 비공개 사유·조회공시 답변 갈음처럼 표에 없는 사실이 여기에만 있다.
+# 정정공시 표에도 같은 라벨이 나오므로 **마지막** 것을 본문으로 본다.
+_NOTE_ANCHOR = re.compile(r"기타 투자판단(?:에 참고할 사항|과 관련한 중요사항)")
+
 
 def _body(text: str) -> str:
     """정정 헤더를 걷어낸 실제 공시 본문."""
@@ -59,11 +65,43 @@ def _value_after(text: str, label: str) -> str:
     return v
 
 
+def _clip(value: str, limit: int) -> str:
+    """길면 자르되 잘렸다는 걸 보이게 한다 — 문장 중간에서 끊긴 값은 오해를 부른다."""
+    return value if len(value) <= limit else value[:limit].rstrip() + "…"
+
+
+def _value_free(text: str, label: str) -> str:
+    """자유서술 칸 전용 — 번호 붙은 **다음 항목**에서만 끊는다.
+
+    표 칸은 라벨 경계로 끊으면 되지만, 서술 칸에는 라벨과 같은 낱말이 문장 안에
+    그대로 나온다. 키이스트는 대금지급 칸에 '(2) 회당 계약금액 : 805,000,000원/회'
+    라고 적었는데, '계약금액'을 라벨로 보는 순간 계약 규모를 좌우하는 그 숫자
+    직전에서 값이 잘렸다. 실제 항목 구분은 '7.', '8.' 같은 번호가 한다.
+    """
+    m = re.search(re.escape(label) + r"\s*(.*?)(?=\s*\d{1,2}\s*\.\s*(?:" + _LABEL_ALT + r")|$)",
+                  text, re.S)
+    if not m:
+        return ""
+    v = " ".join(m.group(1).split())
+    return re.sub(r"^[-\s]+|[-\s]+$", "", v)
+
+
 def _amount(text: str, label: str) -> str:
     """라벨 뒤 첫 숫자만. 뒤따르는 다른 항목의 숫자를 삼키지 않는다."""
     v = _value_after(text, label)
     m = re.search(r"-?[\d,]{4,}", v)
     return m.group(0) if m else ""
+
+
+def extract_notes(text: str) -> str:
+    """'기타 투자판단…' 섹션 원문. '※ 관련공시' 이후는 버린다."""
+    if not text:
+        return ""
+    matches = list(_NOTE_ANCHOR.finditer(text))
+    if not matches:
+        return ""
+    tail = re.split(r"※\s*관련공시", text[matches[-1].end():])[0]
+    return " ".join(tail.split())[:1200]
 
 
 def parse_contract(text: str) -> dict:
@@ -81,7 +119,7 @@ def parse_contract(text: str) -> dict:
 
     name = _value_after(text, "체결계약명") or _value_after(text, "판매ㆍ공급계약 내용")
     if name:
-        out["계약명"] = name[:120]
+        out["계약명"] = _clip(name, 120)
 
     amount = (_amount(text, "계약금액 총액(원)") or _amount(text, "확정 계약금액")
               or _amount(text, "계약금액"))
@@ -101,7 +139,7 @@ def parse_contract(text: str) -> dict:
     # 폴백으로 둘 다 시도하면 '계약상대방'을 '계약상대'로 잘라 값이 '방'이 된다.
     partner = _value_after(text, "계약상대방" if "계약상대방" in text else "계약상대")
     if partner:
-        out["계약상대방"] = partner[:80]
+        out["계약상대방"] = _clip(partner, 80)
     relation = _value_after(text, "회사와의 관계")
     if relation:
         out["관계"] = relation[:40]
@@ -117,6 +155,16 @@ def parse_contract(text: str) -> dict:
     m = _DATE.search(_value_after(text, "계약(수주)일자"))
     if m:
         out["수주일자"] = m.group(0)
+
+    # 이 칸엔 대금지급 조건만 오지 않는다 — 키이스트는 회당 단가(805,000,000원/회)와
+    # 회차(28부작)를 여기 적었다. 계약 규모를 좌우하는 값이라 넉넉히 남긴다.
+    terms = _value_free(text, "대금지급 조건 등")
+    if terms:
+        out["대금지급"] = _clip(terms, 300)
+    # 상대방이 비어 있을 때 왜 비었는지가 곧 정보다 — 유보 사유는 공시에 있다.
+    hold = _value_after(text, "유보사유")
+    if hold:
+        out["유보사유"] = _clip(hold, 80)
     return out
 
 
@@ -140,6 +188,9 @@ def format_contract_card(corp_name: str, report_nm: str, text: str) -> str:
         lines.append(f"• 매출액 대비: {d['매출액대비']}%")
     if d.get("계약상대방"):
         lines.append(f"• 계약상대방: {d['계약상대방']}")
+    elif d.get("유보사유"):
+        # 침묵보다 낫다: 상대방이 없는 게 아니라 공시가 유보한 것이다.
+        lines.append(f"• 계약상대방: 공시유보 ({d['유보사유']})")
     # 값이 '-'뿐이면 아예 표시하지 않는다. 옆 항목 값을 관계로 잘못 적는 것이
     # 두 모델 모두에서 나온 오류였다.
     if d.get("관계"):
@@ -150,4 +201,6 @@ def format_contract_card(corp_name: str, report_nm: str, text: str) -> str:
         lines.append(f"• 공급지역: {d['공급지역']}")
     if d.get("수주일자"):
         lines.append(f"• 계약(수주)일자: {d['수주일자']}")
+    if d.get("대금지급"):
+        lines.append(f"• 대금지급: {d['대금지급']}")
     return "\n".join(lines)
