@@ -178,13 +178,10 @@ async def _run_pipeline():
                         )
                         target_users = list(result.scalars().all())
                         watchlist_ids = {u.chat_id for u in target_users}
-                    if topic:
-                        from services.subscription_service import subscribers
-                        seen_ids = {u.chat_id for u in target_users}
-                        for u in await subscribers(session, topic):
-                            if u.chat_id not in seen_ids:
-                                seen_ids.add(u.chat_id)
-                                target_users.append(u)
+                    # 유형 구독자는 여기서 보내지 않는다. 하루 18건이 낱개로
+                    # 쏟아지면 오히려 놓친다는 실사용자 지적에 따라 send_topic_batches가
+                    # 10분마다 묶어서 보낸다. 워치리스트·긴급은 지금처럼 즉시.
+                    # 미발송으로 남겨두면(SeenDisclosure 미기록) 묶음 잡이 집어간다.
 
                 if not target_users:
                     continue
@@ -450,3 +447,106 @@ async def remind_open_feedback():
         lines.append(f"· {head}")
     await _notify_operator("\n".join(lines))
     print(f"미처리 요청 리마인더 발송: {len(items)}건")
+
+
+TOPIC_BATCH_MAX = 20
+
+
+async def send_topic_batches():
+    """유형 구독 공시를 묶어서 보낸다 (10분 주기).
+
+    낱개 즉시 발송은 "너무 몰아쳐서 놓칠 것 같다"는 실사용자 지적을 받았다.
+    한 메시지에 목록으로 모으고, 각 항목 버튼을 눌러야 요약을 만든다 —
+    관심 없는 건에는 LLM을 쓰지 않으므로 비용·지연도 함께 줄어든다.
+
+    미발송 판정은 즉시 알림과 같은 SeenDisclosure(receipt_no, chat_id)라
+    중복 발송이 없고, 발송에 실패하면 기록하지 않아 다음 주기에 재시도된다.
+    """
+    from dart import fetch_recent_disclosures
+    from notifier import build_topic_keyboard, escape_html, send_with_keyboard
+    from services.subscription_service import subscribers
+    from topics import TOPICS, match_topic
+
+    try:
+        disclosures = await fetch_recent_disclosures(days=2)
+    except Exception as e:
+        print(f"토픽 묶음 수집 실패: {type(e).__name__}: {e}")
+        return
+
+    by_topic: dict[str, list] = {}
+    for d in disclosures:
+        key = match_topic(d.get("report_nm", ""))
+        if key:
+            by_topic.setdefault(key, []).append(d)
+    if not by_topic:
+        return
+
+    sent_total = 0
+    async with AsyncSessionLocal() as session:
+        for key, items in by_topic.items():
+            users = await subscribers(session, key)
+            if not users:
+                continue
+            label = TOPICS.get(key, {}).get("label", key)
+            for user in users:
+                try:
+                    result = await session.execute(
+                        select(SeenDisclosure.receipt_no).where(
+                            SeenDisclosure.chat_id == user.chat_id,
+                            SeenDisclosure.receipt_no.in_(
+                                [d.get("rcept_no") for d in items]
+                            ),
+                        )
+                    )
+                    seen = set(result.scalars().all())
+                    pending = [d for d in items if d.get("rcept_no") not in seen]
+                    if not pending:
+                        continue
+
+                    shown = pending[:TOPIC_BATCH_MAX]
+                    header = (
+                        f"📑 <b>{escape_html(label)}</b> {len(pending)}건\n"
+                        "구독한 유형이라 보내드립니다. 항목을 누르면 요약을 만들어 보여드립니다.\n"
+                    )
+                    lines = [
+                        f"· <b>{escape_html(d.get('corp_name', ''))}</b> "
+                        f"{escape_html(d.get('report_nm', '').strip())}"
+                        for d in shown
+                    ]
+                    tail = (f"\n\n외 {len(pending) - len(shown)}건은 다음 묶음에서 보내드립니다."
+                            if len(pending) > len(shown) else "")
+                    keyboard = build_topic_keyboard([
+                        (f"{d.get('corp_name', '')} | {d.get('report_nm', '').strip()[:24]}",
+                         d.get("rcept_no"))
+                        for d in shown
+                    ])
+
+                    if not await send_with_keyboard(
+                        user.chat_id, header + "\n".join(lines) + tail, keyboard
+                    ):
+                        continue  # 기록하지 않는다 → 다음 주기 재시도
+
+                    # 버튼 클릭 시 재조회 없이 바로 요약할 수 있게 캐시를 채운다
+                    import bot as bot_module
+                    for d in shown:
+                        bot_module.disclosure_cache[d.get("rcept_no")] = d
+
+                    for d in shown:
+                        session.add(SeenDisclosure(
+                            id=str(uuid.uuid4()),
+                            receipt_no=d.get("rcept_no"),
+                            chat_id=user.chat_id,
+                            corp_name=d.get("corp_name", ""),
+                            report_nm=d.get("report_nm", ""),
+                            summary="[유형 구독 묶음]",
+                        ))
+                    await session.commit()
+                    sent_total += len(shown)
+                    print(f"토픽 묶음 발송: {key} chat={user.chat_id} {len(shown)}건")
+                except Exception as e:
+                    await session.rollback()
+                    print(f"토픽 묶음 실패 ({key}, chat={user.chat_id}): "
+                          f"{type(e).__name__}: {e}")
+
+    poll_status["last_topic_batch_at"] = _now_kst_iso()
+    poll_status["last_topic_batch_count"] = sent_total

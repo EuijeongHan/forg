@@ -547,6 +547,7 @@ def _topic_text(subscribed: set[str]) -> str:
         lines.append(f"   {spec['desc']}")
     lines.append("")
     lines.append("버튼을 눌러 켜고 끕니다.")
+    lines.append("구독 알림은 10분마다 묶어서 한 통으로 오고, 항목을 누르면 요약이 열립니다.")
     lines.append("그날 나온 것만 몰아보려면: /market 공급계약 "
                  "(지난 날짜도 됩니다 — /market 어제 공급계약)")
     return "\n".join(lines)

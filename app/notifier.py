@@ -1,5 +1,5 @@
 import asyncio
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from config import TELEGRAM_BOT_TOKEN
@@ -146,3 +146,28 @@ async def send_system_message(chat_id: str, text: str):
         await bot.send_message(chat_id=chat_id, text=text)
     except TelegramError as e:
         print(f"시스템 메시지 발송 실패: {e}")
+
+
+def build_topic_keyboard(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    """(라벨, 접수번호) 목록 → 상세 조회 버튼. 조회 목록과 같은 view: 콜백을 쓴다."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(label[:60], callback_data=f"view:{rcept_no}")]
+        for label, rcept_no in items
+    ])
+
+
+async def send_with_keyboard(chat_id: str, html_text: str, reply_markup) -> bool:
+    """HTML 메시지 + 인라인 키보드. 호출측이 escape_html을 책임진다."""
+    if len(html_text) > MAX_MESSAGE_LENGTH:
+        cut = html_text[: MAX_MESSAGE_LENGTH - 40]
+        if "\n" in cut:
+            cut = cut[: cut.rfind("\n")]
+        html_text = cut + "\n\n... (이하 생략)"
+    try:
+        bot = get_bot()
+        await bot.send_message(chat_id=chat_id, text=html_text,
+                               parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+        return True
+    except TelegramError as e:
+        print(f"묶음 알림 발송 실패: {e}")
+        return False
