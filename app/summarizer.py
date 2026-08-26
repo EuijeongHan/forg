@@ -1,6 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import re
 import config
 
 _KST = ZoneInfo("Asia/Seoul")
@@ -309,21 +310,34 @@ async def summarize_disclosure(
     # 공급계약은 정형 API가 없지만 원문이 번호 붙은 표라 값을 코드로 뽑을 수 있다.
     # 두 모델(gpt-4o-mini·gpt-5-mini)이 똑같이 '회사와의 관계'를 옆 항목 값으로
     # 오독한 것이 계기다 — 능력이 아니라 구조 문제라 파싱으로 없앤다(2026-08-26).
-    from contract_card import format_contract_card
+    from contract_card import extract_notes, format_contract_card
     card = format_contract_card(corp_name, report_nm, content) if content else ""
     if card:
+        # 카드가 이미 수치를 다 담았으므로 💡가 그걸 되풀이하면 지면 낭비다.
+        # 표에 없는 '기타 투자판단' 섹션만 요약한다 — 첫 사용자가 요청한 4번째 항목.
+        notes = extract_notes(content)
+        if not notes:
+            return card
         comment_prompt = chr(10).join([
-            f"기업명: {corp_name}",
-            f"공시 유형: {report_nm}",
-            "공시 핵심 데이터:",
-            card,
+            "다음은 공시의 '기타 투자판단에 참고할 사항' 원문이다.",
+            "투자자가 알아야 할 실질 정보만 1-3문장으로 정리하라.",
             "",
-            "위 데이터에서 투자자가 주목할 핵심 포인트를 1-2줄만 추가하세요. 규칙:",
-            "1. 카드에 적힌 수치·날짜만 언급한다. 새 수치를 계산하지 않는다.",
-            "2. 카드에 없는 항목은 언급 자체를 하지 않는다 ('정보 없음' 서술 금지).",
-            "3. 카드에 없는 사실(리스크 추정, 환율 영향, 규모 평가 등)을 덧붙이지 않는다.",
-            "4. 매수/매도/호재/악재 등 투자 판단 표현을 쓰지 않는다.",
-            "5. 규모·중요성에 대한 평가('중요성이 높다', '대형 계약' 등)를 하지 않는다.",
+            "제외(모든 공시에 붙는 정형 문구):",
+            "- 최근 매출액이 몇 년도 재무제표 기준인지",
+            "- 계약금액의 VAT 포함/별도 여부",
+            "- 계약금액·기간이 향후 변경될 수 있다는 일반 문구",
+            "- 계약(수주)일자의 정의",
+            "",
+            "포함(있을 때만): 회당·단위 단가, 수량, 분할계약의 연차별 금액,",
+            "적용 환율, 상대방·지역 비공개 사유, 다른 공시와의 관계(조회공시 답변",
+            "갈음 등), 공사·납품 조건 중 위 제외 목록에 없는 사실.",
+            "",
+            "규칙: 사실만 쓴다. 투자 의견·중요도 평가·전망을 쓰지 않는다.",
+            "원문에 없는 숫자를 만들지 않는다.",
+            "포함할 내용이 없으면 정확히 '없음' 한 단어만 답한다.",
+            "",
+            "원문:",
+            notes,
         ])
         return await _append_ai_comment(card, comment_prompt, {"content": content})
 
@@ -571,6 +585,10 @@ async def _append_ai_comment(card: str, prompt: str, ground: dict) -> str:
     """
     ai_comment = await _generate_with_fallback(prompt)
     if not ai_comment:
+        return card
+    # 프롬프트가 '내용 없으면 없음'을 지시한다 — 그 경우 카드만 보낸다.
+    # 모델이 '없음.', '- 없음', '**없음**'처럼 꾸며 답해도 같게 본다.
+    if re.sub(r"[\s.\-*·]", "", ai_comment) in ("없음", "해당없음", "특이사항없음"):
         return card
 
     from verification.checks import cross_check_amounts
