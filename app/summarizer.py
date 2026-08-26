@@ -306,9 +306,28 @@ async def summarize_disclosure(
         await _notify_budget_once()
         return "오늘 자동 요약 한도에 도달했습니다. DART 원문을 확인해주세요."
 
-    prompt = build_prompt(corp_name, report_nm, content)
+    # 공급계약은 정형 API가 없지만 원문이 번호 붙은 표라 값을 코드로 뽑을 수 있다.
+    # 두 모델(gpt-4o-mini·gpt-5-mini)이 똑같이 '회사와의 관계'를 옆 항목 값으로
+    # 오독한 것이 계기다 — 능력이 아니라 구조 문제라 파싱으로 없앤다(2026-08-26).
+    from contract_card import format_contract_card
+    card = format_contract_card(corp_name, report_nm, content) if content else ""
+    if card:
+        comment_prompt = chr(10).join([
+            f"기업명: {corp_name}",
+            f"공시 유형: {report_nm}",
+            "공시 핵심 데이터:",
+            card,
+            "",
+            "위 데이터에서 투자자가 주목할 핵심 포인트를 1-2줄만 추가하세요. 규칙:",
+            "1. 카드에 적힌 수치·날짜만 언급한다. 새 수치를 계산하지 않는다.",
+            "2. 카드에 없는 항목은 언급 자체를 하지 않는다 ('정보 없음' 서술 금지).",
+            "3. 카드에 없는 사실(리스크 추정, 환율 영향, 규모 평가 등)을 덧붙이지 않는다.",
+            "4. 매수/매도/호재/악재 등 투자 판단 표현을 쓰지 않는다.",
+            "5. 규모·중요성에 대한 평가('중요성이 높다', '대형 계약' 등)를 하지 않는다.",
+        ])
+        return await _append_ai_comment(card, comment_prompt, {"content": content})
 
-    result = await _generate_with_fallback(prompt)
+    result = await _generate_with_fallback(build_prompt(corp_name, report_nm, content))
     if result:
         return result
 
@@ -530,20 +549,38 @@ async def summarize_typed_disclosure(
         "5. 매수/매도/호재/악재 등 투자 판단 표현을 쓰지 않는다.",
     ])
     
-    # 카드 수치는 이미 확보됐으므로 코멘트 생성은 실패해도 무방하지만,
-    # 알림 경로와 동일한 폴백 체인을 태워 주력 프로바이더 장애 시에도 유지한다.
-    ai_comment = await _generate_with_fallback(prompt)
+    return await _append_ai_comment(card, prompt, data)
 
+
+# 💡 코멘트 전용 판단 표현 필터. 티어0의 투자의견 검사는 매수/매도/호재 같은
+# 직접 표현만 잡아 '중요성이 높습니다' 류를 통과시켰다(2026-08-26 judge 적발).
+# 요약 본문 전체에 이 목록을 적용하면 공시 원문 인용까지 막히므로, 버려도
+# 손실이 없는 코멘트에만 쓴다 — 카드는 그대로 발송된다.
+_COMMENT_JUDGEMENT_MARKERS = (
+    "중요성", "중요도", "긍정적", "부정적", "우호적", "수혜", "모멘텀",
+    "기대됩니다", "전망됩니다", "예상됩니다", "규모가 크", "대형 계약",
+)
+
+
+async def _append_ai_comment(card: str, prompt: str, ground: dict) -> str:
+    """카드에 💡 한 줄을 덧붙이되, 근거 없는 대형 금액이 있으면 코멘트를 버린다.
+
+    카드 수치는 코드가 뽑았으니 늘 옳다. 위험한 건 그것을 '다시 말하는' 코멘트다 —
+    홀드아웃 평가에서 300억을 30조로 옮겨 적은 1000배 오기가 나왔다. ground(정형
+    응답 또는 원문)에 근거가 없으면 카드만 보낸다. 틀린 숫자를 덧붙이는 것보다 낫다.
+    """
+    ai_comment = await _generate_with_fallback(prompt)
     if not ai_comment:
         return card
 
-    # 카드 수치는 정형 API에서 왔으니 늘 옳다. 위험한 건 그것을 '다시 말하는'
-    # 코멘트다 — 홀드아웃 평가에서 300억(30,000,000,000)을 30조로 옮겨 적은
-    # 1000배 오기가 나왔다. 정형 응답에 근거가 없는 대형 금액이 코멘트에 있으면
-    # 코멘트를 버린다. 카드만 보내는 편이 틀린 숫자를 덧붙이는 것보다 낫다.
     from verification.checks import cross_check_amounts
-    ungrounded = cross_check_amounts(ai_comment, data)["unverified_large"]
+    ungrounded = cross_check_amounts(ai_comment, ground)["unverified_large"]
     if ungrounded:
-        print(f"💡 코멘트 폐기 — 정형 근거 없는 금액: {[str(x) for x in ungrounded[:3]]}")
+        print(f"💡 코멘트 폐기 — 근거 없는 금액: {[str(x) for x in ungrounded[:3]]}")
+        return card
+
+    judged = [m for m in _COMMENT_JUDGEMENT_MARKERS if m in ai_comment]
+    if judged:
+        print(f"💡 코멘트 폐기 — 판단 표현: {judged[:3]}")
         return card
     return card + chr(10) + chr(10) + "💡 " + ai_comment.strip()
