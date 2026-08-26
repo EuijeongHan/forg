@@ -24,7 +24,7 @@ os.environ["TELEGRAM_CHAT_ID"] = "operator-chat"
 sys.path.insert(0, APP)
 logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
-state = {"disclosures": [], "sent": []}
+state = {"disclosures": [], "sent": [], "batches": []}
 
 dart_stub = types.ModuleType("dart")
 async def fetch_recent_disclosures(days=1): return list(state["disclosures"])
@@ -63,10 +63,17 @@ async def send_alert(chat_id, corp_name, report_nm, receipt_no, summary, tier="i
 async def send_system_message(chat_id, text): pass
 async def send_html_message(chat_id, html_text): return True
 def escape_html(t): return t
+def build_topic_keyboard(items):
+    return [(label, rc) for label, rc in items]
+async def send_with_keyboard(chat_id, html_text, reply_markup):
+    state["batches"].append((chat_id, html_text, reply_markup))
+    return True
 notif.send_alert = send_alert
 notif.send_system_message = send_system_message
 notif.send_html_message = send_html_message
 notif.escape_html = escape_html
+notif.build_topic_keyboard = build_topic_keyboard
+notif.send_with_keyboard = send_with_keyboard
 sys.modules["notifier"] = notif
 
 from database import AsyncSessionLocal, init_db  # noqa: E402
@@ -140,20 +147,46 @@ async def main():
     state["sent"].clear()
     await tasks.process_disclosures()
 
-    check("구독자는 등록 안 한 기업 공시도 받음", sent_to("geonsoo"), [("T1", "topic"), ("T2", "topic")])
-    check("미구독자는 워치리스트 밖 공급계약 안 받음",
-          [r for r, _ in sent_to("noona")], ["T2", "T3"])
-    check("미구독자의 워치리스트 건은 important 머리말",
+    # 구독 알림은 즉시가 아니라 묶음으로 간다("너무 몰아친다" 지적 반영)
+    check("구독자는 즉시 알림을 받지 않음", sent_to("geonsoo"), [])
+    check("미구독자는 워치리스트 건만 즉시", [r for r, _ in sent_to("noona")], ["T2", "T3"])
+    check("워치리스트 건은 important 머리말",
           sorted(t for _, t in sent_to("noona")), ["important", "important"])
-    both = sent_to("both")
-    check("둘 다 해당해도 T2는 한 번만", [r for r, _ in both].count("T2"), 1)
-    check("워치리스트 사용자에겐 important 우선", dict(both)["T2"], "important")
-    check("구독으로만 오는 건 topic", dict(both)["T1"], "topic")
+    both_now = sent_to("both")
+    check("워치리스트+구독자도 워치리스트 건은 즉시", [r for r, _ in both_now], ["T2", "T3"])
+    check("즉시 발송에 topic 머리말 없음",
+          all(t != "topic" for _, _, t in state["sent"]), True)
 
     # 재폴링 시 중복 발송 없음
     state["sent"].clear()
     await tasks.process_disclosures()
     check("재폴링 중복 발송 없음", state["sent"], [])
+
+    # ── 파트 3b: 묶음 발송 ───────────────────────────────────────────
+    state["batches"].clear()
+    await tasks.send_topic_batches()
+    by_chat = {c: (t, kb) for c, t, kb in state["batches"]}
+    check("구독자 두 명에게 묶음 1통씩", sorted(by_chat), ["both", "geonsoo"])
+
+    g_text, g_kb = by_chat["geonsoo"]
+    check("묶음은 한 통에 2건", len(g_kb), 2)
+    check("묶음에 건수 표기", "2건" in g_text, True)
+    check("묶음 항목이 버튼으로 제공", sorted(rc for _, rc in g_kb), ["T1", "T2"])
+    check("버튼 라벨에 기업명", any("머나먼전자" in label for label, _ in g_kb), True)
+    check("버튼 콜백은 상세 조회와 동일 경로(view:)",
+          all(isinstance(rc, str) for _, rc in g_kb), True)
+
+    b_text, b_kb = by_chat["both"]
+    check("워치리스트로 이미 받은 건은 묶음에서 제외", [rc for _, rc in b_kb], ["T1"])
+
+    # 클릭 시 재조회 없이 요약하도록 캐시가 채워졌는지
+    import bot as bot_mod
+    check("묶음 항목이 조회 캐시에 적재됨", "T1" in bot_mod.disclosure_cache, True)
+
+    # 재실행 시 중복 묶음 없음
+    state["batches"].clear()
+    await tasks.send_topic_batches()
+    check("묶음 재실행 시 중복 없음", state["batches"], [])
 
     # ── 파트 4: 삭제 ─────────────────────────────────────────────────
     counts = await user_service.delete_user_data("geonsoo")

@@ -7,7 +7,7 @@ from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI
 from database import init_db
 from tasks import (process_disclosures, remind_open_feedback, run_llm_canary,
-                   send_daily_digest)
+                   send_daily_digest, send_topic_batches)
 from bot import create_bot_app
 from config import POLLING_INTERVAL, TELEGRAM_CHAT_ID
 from notifier import send_system_message
@@ -101,6 +101,16 @@ async def lifespan(app: FastAPI):
         remind_open_feedback,
         CronTrigger(hour=9, minute=0, timezone=_KST),
         id="feedback_reminder",
+        max_instances=1,
+        coalesce=True,
+    )
+    # 유형 구독 묶음 — 10분마다. 낱개로 쏟아지면 놓친다는 실사용자 지적에 따라
+    # 목록 한 통으로 모으고, 요약은 버튼을 누른 건만 만든다.
+    scheduler.add_job(
+        send_topic_batches,
+        "interval",
+        minutes=10,
+        id="topic_batches",
         max_instances=1,
         coalesce=True,
     )
