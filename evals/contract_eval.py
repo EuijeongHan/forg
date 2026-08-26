@@ -119,6 +119,8 @@ async def main():
     ap.add_argument("--limit", type=int, default=18)
     ap.add_argument("--out-dir", default="/evals/results")
     ap.add_argument("--no-judge", action="store_true")
+    ap.add_argument("--mode", choices=("llm", "card"), default="llm",
+                    help="llm=원문을 LLM이 읽는 기존 경로 / card=결정론 파싱+💡 (프로덕션)")
     args = ap.parse_args()
 
     items = [json.loads(l) for l in open(args.golden, encoding="utf-8") if l.strip()][:args.limit]
@@ -126,11 +128,16 @@ async def main():
 
     rows = []
     for i, it in enumerate(items, 1):
-        summary = await generate(args.model, it["corp_name"], it["report_nm"], it["content"])
+        if args.mode == "card":
+            import summarizer
+            summary = await summarizer.summarize_disclosure(
+                it["corp_name"], it["report_nm"], it["content"])
+        else:
+            summary = await generate(args.model, it["corp_name"], it["report_nm"], it["content"])
         t0 = tier0(summary, it["content"])
         j = None if args.no_judge else await judge(it["content"], summary)
         rows.append({**{k: it[k] for k in ("rcept_no", "corp_name", "report_nm")},
-                     "model": args.model, "summary": summary, "tier0": t0, "judge": j})
+                     "model": args.model, "mode": args.mode, "summary": summary, "tier0": t0, "judge": j})
         mark = "".join("O" if v else "." for v in t0["covered"].values())
         print(f"  {i:2}/{len(items)} {it['corp_name'][:10]:10} 커버 {mark} "
               f"근거없는금액 {len(t0['ungrounded_amounts'])} "
@@ -141,6 +148,7 @@ async def main():
     agg = {
         "n": n,
         "model": args.model,
+        "mode": args.mode,
         "coverage_rate": round(sum(r["tier0"]["coverage_rate"] for r in rows) / n, 3),
         "field_coverage": {
             k: round(sum(1 for r in rows if r["tier0"]["covered"][k]) / n, 3)
@@ -161,7 +169,7 @@ async def main():
 
     out = pathlib.Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    tag = args.model.replace(".", "").replace("/", "-")
+    tag = args.model.replace(".", "").replace("/", "-") + ("-card" if args.mode == "card" else "")
     stamp = datetime.now().strftime("%Y-%m-%d")
     with open(out / f"{stamp}-contract-eval-{tag}.jsonl", "w", encoding="utf-8") as f:
         for r in rows:
