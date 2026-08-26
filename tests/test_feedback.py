@@ -26,14 +26,16 @@ state = {"operator_msgs": [], "forward_fails": False}
 dart_stub = types.ModuleType("dart")
 async def fetch_recent_disclosures(days=1): return []
 async def save_disclosures_to_db(d): pass
+async def fetch_rcept_times(date): return {}
 async def fetch_disclosure_detail(r): return ""
 async def fetch_typed_disclosure(c, r, n, d): return {}
 def is_important(nm): return False
 def is_after_hours(t): return False
 def today_kst(): return "20260818"
 def kst_date_str(days_ago=0): return "20260818"
-for f in (fetch_recent_disclosures, save_disclosures_to_db, fetch_disclosure_detail,
-          fetch_typed_disclosure, is_important, is_after_hours, today_kst, kst_date_str):
+for f in (fetch_recent_disclosures, save_disclosures_to_db, fetch_rcept_times,
+          fetch_disclosure_detail, fetch_typed_disclosure, is_important,
+          is_after_hours, today_kst, kst_date_str):
     setattr(dart_stub, f.__name__, f)
 sys.modules["dart"] = dart_stub
 
@@ -70,9 +72,11 @@ def check(label, actual, expected):
 class FakeMessage:
     def __init__(self):
         self.replies = []
+        self.markups = []
 
     async def reply_text(self, text, **kwargs):
         self.replies.append(text)
+        self.markups.append(kwargs.get("reply_markup"))
 
 
 class FakeChat:
@@ -137,6 +141,52 @@ async def main():
     check("삭제 집계에 피드백 포함", counts["feedback"], 1)
     check("삭제 후 피드백 없음", len(await feedback_rows("g1")), 0)
     check("다른 사용자 피드백은 유지", len(await feedback_rows("g2")), 1)
+
+
+    # ── 상태 추적: 사용자 요청은 놓치면 안 된다 (2026-08-26) ────────
+    from services import feedback_service
+    import tasks
+
+    rows = await feedback_rows("g2")
+    check("접수 직후 상태는 미처리", rows[0].status, "new")
+    check("미처리 목록에 포함", len(await feedback_service.open_items()), 1)
+    check("미처리 건수", await feedback_service.open_count(), 1)
+
+    # 신고자는 자기 요청의 처리 여부를 볼 수 있어야 한다
+    u3 = FakeUpdate("g2")
+    await bot.inbox(u3, FakeContext([]))
+    check("신고자 /inbox — 접수됨 표시", "⏳ 접수됨" in u3.message.replies[0], True)
+
+    # 운영자는 전체 미처리를 본다
+    op = FakeUpdate("op-chat")
+    await bot.inbox(op, FakeContext([]))
+    check("운영자 /inbox — 미처리 노출", "미처리 요청" in op.message.replies[0], True)
+    check("처리 완료 버튼 제공",
+          op.message.markups[0].inline_keyboard[0][0].callback_data.startswith("fbdone:"), True)
+
+    # 리마인더: 남아 있으면 매일 알린다
+    state["operator_msgs"].clear()
+    await tasks.remind_open_feedback()
+    check("미처리 있으면 운영자 리마인더", len(state["operator_msgs"]), 1)
+    check("리마인더에 처리 경로 안내", "/inbox" in state["operator_msgs"][0][1], True)
+
+    # 완료 처리 → 목록에서 빠지고 리마인더도 멈춘다
+    fid = rows[0].id
+    check("완료 처리", await feedback_service.mark_done(fid), True)
+    check("이미 완료면 False", await feedback_service.mark_done(fid), False)
+    check("미처리 목록에서 제거", await feedback_service.open_count(), 0)
+
+    state["operator_msgs"].clear()
+    await tasks.remind_open_feedback()
+    check("미처리 없으면 조용", state["operator_msgs"], [])
+
+    u4 = FakeUpdate("g2")
+    await bot.inbox(u4, FakeContext([]))
+    check("신고자에게 처리됨으로 보임", "✅ 처리됨" in u4.message.replies[0], True)
+
+    op2 = FakeUpdate("op-chat")
+    await bot.inbox(op2, FakeContext([]))
+    check("운영자 화면 비었음 안내", "없음" in op2.message.replies[0], True)
 
 
 asyncio.run(main())

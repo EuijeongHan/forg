@@ -6,7 +6,7 @@ moving them to shared storage is a later SaaS-transition task).
 """
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from config import TELEGRAM_BOT_TOKEN
+from config import OPERATOR_CHAT_IDS, TELEGRAM_BOT_TOKEN
 from services import (corp_service, disclosure_service, feedback_service, query_service,
                       subscription_service, user_service, watchlist_service)
 from topics import TOPICS
@@ -444,6 +444,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "   (단일판매·공급계약체결 등 — 커버리지 밖 기업 건도 신호가 되는 유형)\n\n"
         "■ 기타\n"
         "/feedback 내용 - 오류·불편 신고 (특히 '와야 할 알림이 안 온 경우' 제보가 가장 큰 도움이 됩니다)\n"
+        "/inbox - 내가 보낸 요청과 처리 여부\n"
         "/settings - 설정\n"
         "/deletedata - 내 데이터 전체 삭제\n\n"
         "ℹ️ forG는 DART 공시를 AI로 요약해 전달하는 참고용 도구입니다.\n"
@@ -546,6 +547,8 @@ def _topic_text(subscribed: set[str]) -> str:
         lines.append(f"   {spec['desc']}")
     lines.append("")
     lines.append("버튼을 눌러 켜고 끕니다.")
+    lines.append("그날 나온 것만 몰아보려면: /market 공급계약 "
+                 "(지난 날짜도 됩니다 — /market 어제 공급계약)")
     return "\n".join(lines)
 
 
@@ -612,6 +615,55 @@ async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("접수했습니다. 확인 후 반영하겠습니다. 감사합니다 🙏")
 
 
+async def inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """미처리 사용자 요청 확인.
+
+    사용자 요청은 1순위이고 놓쳐선 안 된다. 접수만 쌓이고 처리 여부가 없으면
+    대화가 넘어갈 때 조용히 묻힌다 — 이 서비스가 계속 없애온 침묵 실패다.
+    운영자에게는 전체 미처리를, 신고한 사람에게는 본인 것의 처리 여부를 보여준다.
+    """
+    chat_id = str(update.effective_chat.id)
+
+    if chat_id in OPERATOR_CHAT_IDS:
+        items = await feedback_service.open_items()
+        if not items:
+            await update.message.reply_text("📥 미처리 사용자 요청 없음. 전부 처리됐습니다.")
+            return
+        for row in items:
+            when = row.created_at.strftime("%m/%d %H:%M") if row.created_at else "-"
+            body = row.text if len(row.text) <= 500 else row.text[:500] + " …"
+            await update.message.reply_text(
+                f"📥 미처리 요청 ({when} · {row.chat_id})\n\n{body}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "✅ 처리 완료", callback_data=f"fbdone:{row.id}")]]),
+            )
+        return
+
+    mine = await feedback_service.my_items(chat_id)
+    if not mine:
+        await update.message.reply_text(
+            "보낸 요청이 없습니다.\n/feedback 내용 으로 보내주시면 접수됩니다."
+        )
+        return
+    lines = ["📥 내가 보낸 요청"]
+    for row in mine:
+        when = row.created_at.strftime("%m/%d") if row.created_at else "-"
+        mark = "✅ 처리됨" if row.status == "done" else "⏳ 접수됨"
+        head = row.text.splitlines()[0][:40]
+        lines.append(f"{mark} · {when} · {head}")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def feedback_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if str(query.from_user.id) not in OPERATOR_CHAT_IDS:
+        await query.answer("운영자만 처리할 수 있습니다.", show_alert=True)
+        return
+    ok = await feedback_service.mark_done(query.data.split(":", 1)[1])
+    await query.answer("처리 완료로 표시했습니다." if ok else "이미 처리된 요청입니다.")
+    await query.edit_message_reply_markup(reply_markup=None)
+
+
 async def deletedata(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """개인정보처리방침이 안내한 삭제 요청 경로. 되돌릴 수 없으므로 확인을 받는다."""
     chat_id = str(update.effective_chat.id)
@@ -668,6 +720,7 @@ def create_bot_app() -> Application:
     app.add_handler(CommandHandler("ask", ask))
     app.add_handler(CommandHandler("feedback", feedback))
     app.add_handler(CommandHandler("topic", topic))
+    app.add_handler(CommandHandler("inbox", inbox))
     # 구 명령 별칭 — 기존 사용자의 손버릇을 깨지 않는다
     app.add_handler(CommandHandler("today", legacy_today))
     app.add_handler(CommandHandler("mytoday", legacy_today))
@@ -683,5 +736,6 @@ def create_bot_app() -> Application:
     app.add_handler(CallbackQueryHandler(view_disclosure_callback, pattern="^view:"))
     app.add_handler(CallbackQueryHandler(page_callback, pattern="^page:"))
     app.add_handler(CallbackQueryHandler(topic_callback, pattern="^topic:"))
+    app.add_handler(CallbackQueryHandler(feedback_done_callback, pattern="^fbdone:"))
     app.add_handler(CallbackQueryHandler(toggle_sync_callback, pattern="^toggle_sync$"))
     return app

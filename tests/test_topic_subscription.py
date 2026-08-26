@@ -30,14 +30,19 @@ dart_stub = types.ModuleType("dart")
 async def fetch_recent_disclosures(days=1): return list(state["disclosures"])
 async def save_disclosures_to_db(d): pass
 async def fetch_rcept_times(date): return {}
+async def fetch_disclosures_range(bgn_de, end_de):
+    return [d for d in state["disclosures"] if bgn_de <= d["rcept_dt"] <= end_de]
+async def fetch_today_disclosures_from_db(important_only=False):
+    items = list(state["disclosures"])
+    return [d for d in items if is_important(d["report_nm"])] if important_only else items
 async def fetch_disclosure_detail(r): return "본문"
 async def fetch_typed_disclosure(c, r, n, d): return {}
 def is_after_hours(t): return False
 def today_kst(): return "20260826"
 def kst_date_str(days_ago=0): return "20260825" if days_ago else "20260826"
 for f in (fetch_recent_disclosures, save_disclosures_to_db, fetch_rcept_times,
-          fetch_disclosure_detail, fetch_typed_disclosure,
-          is_after_hours, today_kst, kst_date_str):
+          fetch_disclosures_range, fetch_today_disclosures_from_db, fetch_disclosure_detail,
+          fetch_typed_disclosure, is_after_hours, today_kst, kst_date_str):
     setattr(dart_stub, f.__name__, f)
 from config import IMPORTANT_REPORT_TYPES  # noqa: E402
 def is_important(nm): return any(k in nm for k in IMPORTANT_REPORT_TYPES)
@@ -163,6 +168,21 @@ async def main():
     check("볼륨을 미리 알려줌", "18건" in on_text, True)
     off_text = bot._topic_text(set())
     check("미구독 표시", "⬜ 미구독" in off_text, True)
+
+
+    # ── 파트 6: 그날 나온 토픽 공시 몰아보기 ────────────────────────
+    # 구독은 실시간 수신, 조회는 /market 검색어. 사용자 질문:
+    # "토픽 등록하고 그날 시장에서 그 토픽 검색하려면?"
+    from services import disclosure_service as ds
+    r = await ds.query_disclosures(scope="market", important_only=True, query="공급계약")
+    check("'/market 공급계약'이 그날 공급계약만 뽑음",
+          sorted(d["rcept_no"] for d in r.items), ["T1", "T2"])
+    check("헤더에 검색어 표기", "'공급계약'" in r.header(), True)
+    r2 = await ds.query_disclosures(scope="market", important_only=True, query="단일판매")
+    check("'단일판매'로도 동일하게 조회", sorted(d["rcept_no"] for d in r2.items), ["T1", "T2"])
+    r3 = await ds.query_disclosures(scope="market", important_only=True,
+                                    query="공급계약", date="20260825")
+    check("날짜 조합 조회도 토픽 검색어와 함께 동작", r3.date, "20260825")
 
 
 asyncio.run(main())

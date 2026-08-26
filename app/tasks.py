@@ -424,3 +424,29 @@ async def run_llm_canary():
             "🚨 forG: LLM 프로바이더 전원 실패 — 요약이 완전히 중단된 상태입니다.\n"
             + "\n".join(f"· {n}: {results[n].get('error') or '?'}" for n in dead)
         )
+
+
+async def remind_open_feedback():
+    """미처리 사용자 요청을 매일 운영자에게 상기시킨다.
+
+    사용자 요청은 1순위이고, 잊히는 경로는 언제나 '조용함'이다. 남아 있는 한
+    매일 다시 알린다 — 처리하면 자연히 멈춘다.
+    """
+    from services import feedback_service
+
+    try:
+        items = await feedback_service.open_items(limit=5)
+    except Exception as e:
+        print(f"미처리 요청 조회 실패: {type(e).__name__}: {e}")
+        return
+
+    poll_status["open_feedback"] = len(items)
+    if not items:
+        return
+
+    lines = [f"📥 미처리 사용자 요청 {len(items)}건 — /inbox 에서 처리하세요.", ""]
+    for row in items:
+        head = row.text.splitlines()[0][:60]
+        lines.append(f"· {head}")
+    await _notify_operator("\n".join(lines))
+    print(f"미처리 요청 리마인더 발송: {len(items)}건")

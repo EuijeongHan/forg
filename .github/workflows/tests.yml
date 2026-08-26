@@ -114,4 +114,10 @@ jobs:
               IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='uq_watchlist_chat_corp') THEN
                 RAISE EXCEPTION 'missing uq_watchlist_chat_corp';
               END IF;
+              IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                 WHERE table_name='feedback' AND column_name='status'
+              ) THEN
+                RAISE EXCEPTION 'missing feedback.status (migration 0004)';
+              END IF;
             END \$\$;"
