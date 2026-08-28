@@ -70,7 +70,7 @@ async def part2_cache():
     gen_calls = {"n": 0}
 
     dart_stub = types.ModuleType("dart")
-    async def fetch_recent_disclosures(days=1): return []
+    async def fetch_recent_disclosures(days=1, **_kw): return []
     async def fetch_disclosure_detail(r): return "본문"
     async def fetch_typed_disclosure(c, r, n, d): return {"bd_fta": "1"}
     for f in (fetch_recent_disclosures, fetch_disclosure_detail, fetch_typed_disclosure):

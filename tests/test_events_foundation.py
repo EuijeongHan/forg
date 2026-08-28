@@ -66,7 +66,7 @@ async def part2_persistence_and_flag():
     dart_stub = types.ModuleType("dart")
     D = {"rcept_no": "R200", "corp_name": "T전자", "report_nm": "전환사채 발행결정",
          "corp_code": "C0001", "rcept_dt": "20260721"}
-    async def fetch_recent_disclosures(days=1): return [dict(D)]
+    async def fetch_recent_disclosures(days=1, **_kw): return [dict(D)]
     async def save_disclosures_to_db(d): pass
     async def fetch_rcept_times(date): return {}
     async def fetch_disclosure_detail(r): return "본문"

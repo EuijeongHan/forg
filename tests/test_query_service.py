@@ -155,7 +155,7 @@ async def main():
     check("라운드 상한 후 안전 종료", "좁혀" in capped, True)
 
     # ── 6. 도구 예외 격리 ────────────────────────────────────────
-    async def boom(c, r, n, d):
+    async def boom(c, r, n, d, **_kw):
         raise RuntimeError("typed API down")
     dart_stub.fetch_typed_disclosure = boom
     qs._create_completion = scripted([

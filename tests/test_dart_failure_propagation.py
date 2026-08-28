@@ -113,7 +113,7 @@ async def main():
     # ── 파트 2: 파이프라인 — 실패가 성공으로 기록되지 않음 ──────────
     import tasks
 
-    async def boom(days=1):
+    async def boom(days=1, **_kw):
         raise dart.DartApiError("DART status 010: 등록되지 않은 인증키입니다.")
     tasks.fetch_recent_disclosures = boom
 
@@ -126,7 +126,7 @@ async def main():
     check("수집 실패 → fail_streak 증가", tasks.poll_status["fail_streak"], 1)
     check("오류 내용 보존", "010" in (tasks.poll_status["last_error"] or ""), True)
 
-    async def empty_ok(days=1):
+    async def empty_ok(days=1, **_kw):
         return []
     tasks.fetch_recent_disclosures = empty_ok
     await tasks.process_disclosures()
