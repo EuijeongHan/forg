@@ -34,7 +34,7 @@ DISCLOSURES = [
 ]
 
 dart_stub = types.ModuleType("dart")
-async def fetch_recent_disclosures(days=1):
+async def fetch_recent_disclosures(days=1, **_kw):
     if state["mode"] == "raise":
         raise RuntimeError("DART down (simulated)")
     if state["mode"] == "empty":

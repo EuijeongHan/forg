@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from sqlalchemy import select
 import config
@@ -16,6 +16,14 @@ _KST = ZoneInfo("Asia/Seoul")
 
 # 자가 경보 상태 — 단일 프로세스 전제(CLAUDE.md §6-4의 disclosure_cache와 동일 제약).
 # 침묵 사망 방지: 폴링이 조용히 실패/빈손 반복되면 운영자 채팅으로 1회 경보를 보낸다.
+# 조기 종료 폴링이 놓칠 수 있는 것을 되짚는 전체 스윕 주기.
+# 조기 종료는 '아는 공시만 나오는 페이지'에서 멈추므로, 목록에 늦게 올라온
+# 오래된 접수나 '저장은 됐는데 발송 전에 죽은' 공시가 상위 200건 밖으로
+# 밀려나면 다시 볼 기회가 없다. 15분마다 한 번은 전 구간을 다시 훑어
+# 그 창을 15분으로 묶는다. 느린 날의 전체 순회는 ~195초라 매 사이클 할 수 없다.
+FULL_SWEEP_INTERVAL = timedelta(minutes=15)
+_last_full_sweep: datetime | None = None
+
 FAIL_ALERT_THRESHOLD = 5     # 연속 실패 N회에 경보
 EMPTY_ALERT_THRESHOLD = 10   # 평일 장중 공시 0건 N사이클 지속에 경보
 _fail_streak = 0
@@ -99,12 +107,21 @@ async def _store_typed_snapshot(session, receipt_no: str, typed_data: dict):
 async def _run_pipeline():
     """DART 공시 폴링 → DB 저장 → 필터링 → 요약 → 알림 발송"""
     from dart import save_disclosures_to_db, today_kst
-    global _empty_streak, _empty_alerted
+    global _empty_streak, _empty_alerted, _last_full_sweep
     print("공시 폴링 시작...")
 
     # 자정 경계 누락 방지: 어제~오늘 2일 창으로 조회.
     # 중복은 save_disclosures_to_db(rcept_no unique)와 SeenDisclosure가 막는다.
-    disclosures = await fetch_recent_disclosures(days=2)
+    # 평소엔 새 공시가 끊긴 지점에서 멈추고(2페이지 ≈ 20초), 15분에 한 번은
+    # 전 구간을 훑는다. 기동 직후 첫 사이클도 전체 스윕이다 — 재시작 동안
+    # 밀린 공시를 여기서 따라잡는다.
+    now = datetime.now(_KST)
+    full_sweep = _last_full_sweep is None or (now - _last_full_sweep) >= FULL_SWEEP_INTERVAL
+    disclosures = await fetch_recent_disclosures(days=2, incremental=not full_sweep)
+    # 수집에 성공했을 때만 스윕을 소진 처리한다 — 실패한 스윕은 다음에 다시.
+    if full_sweep:
+        _last_full_sweep = now
+    print(f"공시 {len(disclosures or [])}건 수집 ({'전체 스윕' if full_sweep else '증분'})")
     poll_status["last_fetch_count"] = len(disclosures or [])
     if not disclosures:
         if _is_business_hours_kst():

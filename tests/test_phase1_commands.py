@@ -42,7 +42,7 @@ HISTORY = [
 state = {"market": list(MARKET), "range_calls": []}
 
 dart_stub = types.ModuleType("dart")
-async def fetch_recent_disclosures(days=1): return list(state["market"])
+async def fetch_recent_disclosures(days=1, **_kw): return list(state["market"])
 async def fetch_disclosures_range(bgn_de, end_de):
     state["range_calls"].append((bgn_de, end_de))
     return [d for d in HISTORY if bgn_de <= d["rcept_dt"] <= end_de]

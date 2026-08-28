@@ -24,7 +24,7 @@ logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 state = {"operator_msgs": [], "forward_fails": False}
 
 dart_stub = types.ModuleType("dart")
-async def fetch_recent_disclosures(days=1): return []
+async def fetch_recent_disclosures(days=1, **_kw): return []
 async def save_disclosures_to_db(d): pass
 async def fetch_rcept_times(date): return {}
 async def fetch_disclosure_detail(r): return ""

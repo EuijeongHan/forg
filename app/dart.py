@@ -9,6 +9,33 @@ DART_BASE_URL = "https://opendart.fss.or.kr/api"
 KST = ZoneInfo("Asia/Seoul")
 
 
+# DART 응답 지연 실측(2026-08-29 장애): list.json이 한국에서 7.8~9.6초, Railway
+# US West 컨테이너에서 13.2초. 65바이트짜리 빈 응답(013)도 7.8초가 걸리므로
+# 전송량이 아니라 서버 지연이다. 기존 10초는 이 지연을 매번 넘겨 폴링이
+# 연속 67회 실패했다. 여유를 크게 둔다 — 느린 응답은 기다리면 되지만,
+# 타임아웃은 그 사이클의 공시를 통째로 버린다.
+DART_TIMEOUT = 30.0
+_RETRY_ON_TIMEOUT = 1
+
+
+async def _get_with_retry(client, url, *, params=None, timeout: float = DART_TIMEOUT):
+    """일시적 타임아웃은 한 번 다시 시도한다.
+
+    DART가 간헐적으로 한 요청만 늦어질 때, 그 한 번 때문에 사이클 전체(=그
+    시점의 모든 공시 알림)를 버리지 않기 위함이다. 재시도해도 실패하면 예외를
+    그대로 올린다 — §4.1에 따라 실패를 빈 결과로 위장하지 않는다.
+    """
+    last = None
+    for attempt in range(_RETRY_ON_TIMEOUT + 1):
+        try:
+            return await client.get(url, params=params, timeout=timeout)
+        except httpx.TimeoutException as e:
+            last = e
+            if attempt < _RETRY_ON_TIMEOUT:
+                print(f"DART 타임아웃 — 재시도 {attempt + 1}/{_RETRY_ON_TIMEOUT}: {url}")
+    raise last
+
+
 class DartApiError(Exception):
     """DART 응답이 정상(000)도 빈 결과(013)도 아닌 경우.
 
@@ -79,17 +106,24 @@ def get_api_for_report(report_nm: str) -> str:
     return None
 
 
-async def fetch_recent_disclosures(days: int = 1) -> list[dict]:
+async def fetch_recent_disclosures(days: int = 1, incremental: bool = False) -> list[dict]:
     """최근 days일(오늘 포함, KST) 공시 조회.
 
     폴링 파이프라인은 days=2를 쓴다 — 자정 직전(23:5x) 접수 공시가 날짜가
     넘어간 뒤 조회창 밖으로 빠져 영구 누락되는 것을 막기 위함.
     봇 조회(/my)는 기본값 1(오늘만)을 유지한다.
+
+    incremental=True(폴링 전용)면 이미 저장된 공시만 나오는 지점에서 멈춘다.
+    무엇을 아는지는 여기서 직접 조회한다 — 호출부가 DB까지 알 필요는 없다.
     """
-    return await fetch_disclosures_range(kst_date_str(days - 1), today_kst())
+    bgn, end = kst_date_str(days - 1), today_kst()
+    known = await load_known_rcept_nos(bgn, end) if incremental else None
+    return await fetch_disclosures_range(bgn, end, known_rcept_nos=known)
 
 
-async def fetch_disclosures_range(bgn_de: str, end_de: str) -> list[dict]:
+async def fetch_disclosures_range(
+    bgn_de: str, end_de: str, known_rcept_nos: set[str] | None = None
+) -> list[dict]:
     """지정 구간(YYYYMMDD, KST 접수일 기준)의 공시 전체 조회 (list.json, 페이지네이션).
 
     과거 날짜 조회(/my 20260810)와 최근 조회가 같은 경로를 쓴다.
@@ -99,10 +133,22 @@ async def fetch_disclosures_range(bgn_de: str, end_de: str) -> list[dict]:
     전파한다. 페이지네이션 중간 실패도 부분 결과를 돌려주지 않고 예외로
     올린다 — 다음 폴링(60초)이 전체를 재시도하며, 부분 결과는 '나머지가
     없었다'로 읽혀 누락을 만든다.
+
+    known_rcept_nos를 주면(폴링 전용) 이미 아는 공시만 나오는 페이지에 도달한
+    시점에 멈춘다. 목록은 접수시각 내림차순이라 그 뒤는 전부 더 오래된 공시다.
+    바쁜 날은 하루 2,145건 = 22페이지고 한 페이지가 ~10초라 전체 순회에 195초가
+    걸린다 — 60초 주기로는 애초에 완주가 불가능하다(2026-08-29 실측).
+    번호가 아니라 '새 항목이 없는 페이지'로 끊는 이유: rcept_no는 단조가 아니다.
+    거래소 접수(…9xxxxx)와 DART 접수(…0xxxxx)가 별개 수열이라 한 페이지 안에서도
+    900977 다음에 900979가 온다. 고수위 번호로 자르면 공시를 놓친다.
+    안전 여유로 '새 항목 없는 페이지'가 2번 연속일 때 멈추고, 조회된 항목은
+    새 것만이 아니라 전부 돌려준다 — 저장 후 발송 전에 죽은 사이클의 공시를
+    다음 사이클이 다시 집어 올릴 수 있어야 한다.
     """
     url = f"{DART_BASE_URL}/list.json"
     all_disclosures = []
     page = 1
+    stale_pages = 0   # 새 공시가 하나도 없던 연속 페이지 수
 
     async with httpx.AsyncClient() as client:
         while True:
@@ -113,7 +159,7 @@ async def fetch_disclosures_range(bgn_de: str, end_de: str) -> list[dict]:
                 "page_no": page,
                 "page_count": 100,
             }
-            response = await client.get(url, params=params, timeout=10)
+            response = await _get_with_retry(client, url, params=params)
             response.raise_for_status()
             data = response.json()
             status = data.get("status")
@@ -128,6 +174,13 @@ async def fetch_disclosures_range(bgn_de: str, end_de: str) -> list[dict]:
             total_page = int(data.get("total_page", 1))
             if page >= total_page:
                 break
+            if known_rcept_nos is not None:
+                if any(x.get("rcept_no") not in known_rcept_nos for x in items):
+                    stale_pages = 0
+                else:
+                    stale_pages += 1
+                    if stale_pages >= 2:
+                        break
             page += 1
 
     return all_disclosures
@@ -138,16 +191,23 @@ async def save_disclosures_to_db(disclosures: list[dict]):
     from models import Disclosure
     from sqlalchemy import select
 
+    incoming = [d for d in disclosures if d.get("rcept_no")]
+    if not incoming:
+        return
+
     async with AsyncSessionLocal() as session:
-        for d in disclosures:
-            rcept_no = d.get("rcept_no")
-            if not rcept_no:
-                continue
-            existing = await session.execute(
-                select(Disclosure).where(Disclosure.rcept_no == rcept_no)
+        # 건당 SELECT는 사이클마다 수천 번의 왕복이 된다 — 한 번에 확인한다.
+        rows = await session.execute(
+            select(Disclosure.rcept_no).where(
+                Disclosure.rcept_no.in_([d["rcept_no"] for d in incoming])
             )
-            if existing.scalar_one_or_none():
+        )
+        existing = set(rows.scalars().all())
+        for d in incoming:
+            rcept_no = d["rcept_no"]
+            if rcept_no in existing:
                 continue
+            existing.add(rcept_no)   # 같은 응답 안의 중복 방지
             session.add(Disclosure(
                 rcept_no=rcept_no,
                 corp_code=d.get("corp_code", ""),
@@ -160,6 +220,21 @@ async def save_disclosures_to_db(disclosures: list[dict]):
                 is_important=is_important(d.get("report_nm", "")),
             ))
         await session.commit()
+
+
+async def load_known_rcept_nos(bgn_de: str, end_de: str) -> set[str]:
+    """해당 접수일 구간에서 이미 저장된 접수번호 — 폴링의 조기 종료 기준."""
+    from database import AsyncSessionLocal
+    from models import Disclosure
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as session:
+        rows = await session.execute(
+            select(Disclosure.rcept_no).where(
+                Disclosure.rcept_dt >= bgn_de, Disclosure.rcept_dt <= end_de
+            )
+        )
+        return set(rows.scalars().all())
 
 
 async def fetch_today_disclosures_from_db(important_only: bool = False) -> list[dict]:
@@ -225,7 +300,7 @@ async def fetch_disclosure_detail(receipt_no: str) -> str:
     try:
         main_url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt_no}"
         async with httpx.AsyncClient(follow_redirects=True) as client:
-            r = await client.get(main_url, timeout=10)
+            r = await client.get(main_url, timeout=DART_TIMEOUT)
             m = _VIEW_DOC_RE.search(_decode(r))
             if m:
                 _, dcm_no, ele_id, offset, length, dtd = m.groups()
@@ -242,7 +317,7 @@ async def fetch_disclosure_detail(receipt_no: str) -> str:
             f"&eleId={ele_id}&offset={offset}&length={length}&dtd={dtd}"
         )
         async with httpx.AsyncClient(follow_redirects=True) as client:
-            r = await client.get(viewer_url, timeout=15)
+            r = await client.get(viewer_url, timeout=DART_TIMEOUT)
             parser = TextExtractor()
             parser.feed(_decode(r))
             text = " ".join(parser.text)
@@ -266,7 +341,7 @@ async def fetch_typed_disclosure(corp_code: str, rcept_no: str, report_nm: str, 
     }
     async with httpx.AsyncClient() as client:
         try:
-            r = await client.get(url, params=params, timeout=10)
+            r = await client.get(url, params=params, timeout=DART_TIMEOUT)
             data = r.json()
             if data.get("status") != "000":
                 return {}
@@ -287,7 +362,7 @@ async def fetch_rcept_times(date: str) -> dict[str, str]:
     result = {}
     async with httpx.AsyncClient(follow_redirects=True) as client:
         try:
-            r = await client.get(url, params=params, timeout=15)
+            r = await client.get(url, params=params, timeout=DART_TIMEOUT)
             matches = re.findall(r'rcpNo=(\d{14}).*?(\d{2}:\d{2})', r.text, re.DOTALL)
             for rcept_no, time_str in matches:
                 result[rcept_no] = time_str
@@ -329,7 +404,7 @@ async def fetch_corp_disclosures(
                 "page_count": 100,
             }
             try:
-                response = await client.get(url, params=params, timeout=10)
+                response = await client.get(url, params=params, timeout=DART_TIMEOUT)
                 response.raise_for_status()
                 data = response.json()
                 status = data.get("status")

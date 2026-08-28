@@ -25,7 +25,7 @@ logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 state = {"days_seen": [], "mode": "empty", "system_msgs": []}
 
 dart_stub = types.ModuleType("dart")
-async def fetch_recent_disclosures(days=1):
+async def fetch_recent_disclosures(days=1, **_kw):
     state["days_seen"].append(days)
     if state["mode"] == "raise":
         raise RuntimeError("DART down (simulated)")

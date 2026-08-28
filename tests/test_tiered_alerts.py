@@ -24,7 +24,7 @@ logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 state = {"disclosures": [], "sent": [], "digests": [], "bypass_seen": []}
 
 dart_stub = types.ModuleType("dart")
-async def fetch_recent_disclosures(days=1): return list(state["disclosures"])
+async def fetch_recent_disclosures(days=1, **_kw): return list(state["disclosures"])
 async def save_disclosures_to_db(d): pass
 async def fetch_rcept_times(date): return {}
 async def fetch_disclosure_detail(r): return "본문"
