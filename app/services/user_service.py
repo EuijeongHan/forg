@@ -1,5 +1,5 @@
 """User + keyword/settings business logic (telegram-independent)."""
-from sqlalchemy import select
+from sqlalchemy import delete as sql_delete, func, select
 from database import AsyncSessionLocal
 from models import User
 
@@ -106,11 +106,12 @@ async def toggle_sync(chat_id: str) -> User | None:
 async def delete_user_data(chat_id: str) -> dict[str, int]:
     """개인정보처리방침이 보장한 삭제 요청 경로의 실제 구현.
 
-    이 사용자의 워치리스트·발송 기록·피드백·유형 구독·계정을 지운다. 되돌릴 수 없다.
+    이 사용자의 워치리스트·발송 기록·피드백·유형 구독·이용 기록·계정을 지운다.
+    되돌릴 수 없다.
     Disclosure(공시 원본)는 개인정보가 아니라 공개 공시 데이터이므로 남긴다.
     반환값은 삭제된 행 수 — 사용자에게 무엇이 지워졌는지 보여주기 위함이다.
     """
-    from models import Feedback, SeenDisclosure, TopicSubscription, Watchlist
+    from models import Feedback, SeenDisclosure, TopicSubscription, UsageEvent, Watchlist
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -133,6 +134,12 @@ async def delete_user_data(chat_id: str) -> dict[str, int]:
         )
         subs = result.scalars().all()
 
+        # 이용 기록은 행 수가 많을 수 있어 객체로 불러오지 않고 한 번에 지운다.
+        usage_n = await session.scalar(
+            select(func.count()).select_from(UsageEvent).where(UsageEvent.chat_id == chat_id)
+        ) or 0
+        await session.execute(sql_delete(UsageEvent).where(UsageEvent.chat_id == chat_id))
+
         result = await session.execute(select(User).where(User.chat_id == chat_id))
         user = result.scalar_one_or_none()
 
@@ -141,6 +148,7 @@ async def delete_user_data(chat_id: str) -> dict[str, int]:
             "seen": len(seen),
             "feedback": len(feedbacks),
             "topics": len(subs),
+            "usage": usage_n,
             "user": 1 if user else 0,
         }
 

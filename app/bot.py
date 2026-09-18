@@ -261,8 +261,28 @@ def _page_text(header: str, total: int, offset: int) -> str:
     return "\n".join(lines)
 
 
+async def _record_query_result(update, result):
+    """조회 결과 수를 이용 기록에 붙인다.
+
+    검색어 없이 N건이었는데 검색어를 넣자 0건 — 그 키워드가 헛돈다는 뜻이다.
+    결과 객체를 읽는 것까지 전부 보호 구간 안에서 한다: 속성 하나가 없다고
+    사용자가 조회 결과를 못 받으면 기록이 서비스를 깨뜨린 것이다.
+    """
+    try:
+        await usage_service.enrich(
+            update, result_count=len(result.items),
+            detail={"scope": getattr(result, "scope", None),
+                    "date": getattr(result, "date", None),
+                    "before_query": getattr(result, "total_before_query", None),
+                    "filtered_to_empty": bool(getattr(result, "filtered_to_empty", False))},
+        )
+    except Exception as e:
+        print(f"조회 기록 보강 실패(무시): {type(e).__name__}: {e}")
+
+
 async def _send_query_result(update, result, empty_hint: str = ""):
     """조회 결과를 표시한다. 빈 결과는 원인을 구분해 안내한다."""
+    await _record_query_result(update, result)
     if not result.items:
         if result.filtered_to_empty:
             await update.message.reply_text(
@@ -385,6 +405,16 @@ async def view_disclosure_callback(update: Update, context: ContextTypes.DEFAULT
         result["corp_name"], result["report_nm"], receipt_no, result["summary"]
     )
     await query.message.reply_text(msg, parse_mode="HTML")
+    try:
+        await usage_service.enrich(
+            update, corp_name=result.get("corp_name") or None,
+            corp_code=(hint.get("corp_code")
+                       or (result.get("resolved") or {}).get("corp_code")) or None,
+            detail={"report_nm": result.get("report_nm"), "summary": result.get("summary"),
+                    "path": result.get("path"), "source_len": result.get("source_len")},
+        )
+    except Exception as e:
+        print(f"열람 기록 보강 실패(무시): {type(e).__name__}: {e}")
 
 
 async def keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -620,19 +650,17 @@ async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _record_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """모든 업데이트 앞에서 '동사'만 한 번 센다 (group=-1, 흐름은 막지 않는다).
+    """모든 업데이트 앞에서 한 행을 남긴다 (group=-1, 흐름은 막지 않는다).
 
     핸들러 20곳에 로깅을 심으면 새 명령을 추가할 때마다 빠뜨린다. 앞단에서
     한 번 보는 편이 누락이 없다. 기록 실패가 사용자 요청을 깨뜨려선 안 되므로
     어떤 예외도 삼킨다 — 이건 부가 기능이고 서비스 본체가 아니다.
     """
     try:
-        chat = update.effective_chat
-        if chat is None:
-            return
-        await usage_service.record(str(chat.id), usage_service.event_name(update))
+        await usage_service.record(update)
     except Exception as e:
         print(f"사용 기록 실패(무시): {type(e).__name__}: {e}")
+
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -736,7 +764,7 @@ async def confirm_delete_callback(update: Update, context: ContextTypes.DEFAULT_
         "삭제를 완료했습니다.\n"
         f"관심기업 {counts['watchlist']}건, 유형 구독 {counts.get('topics', 0)}건, "
         f"발송 기록 {counts['seen']}건, 피드백 {counts.get('feedback', 0)}건, "
-        f"계정 {counts['user']}건\n\n"
+        f"이용 기록 {counts.get('usage', 0)}건, 계정 {counts['user']}건\n\n"
         "다시 이용하시려면 /start 를 입력해주세요."
     )
 

@@ -1,16 +1,15 @@
-"""사용 기록 검증 — 동사만 세고, 목적어와 사람은 남기지 않는다.
+"""이용 기록 검증 — 평가와 품질 개선에 쓸 수 있는 것이 실제로 남는가.
 
-왜 필요했나: 이 서비스는 '우리가 보낸 것'만 기록해서 사용자가 실제로 쓰는지
-알 방법이 없었다. 발송량은 그날 공시가 많았다는 뜻일 뿐이다.
-
-왜 조심하나: 첫 사용자가 기관 애널리스트다. '오늘 어느 기업을 열어봤나'는
-소속 기관의 리서치 방향이라, 그것만은 남기지 않는 게 설계의 핵심이다.
+2026-09-18 설계 교체: 첫 버전(#82)은 동사만 세고 기업·공시번호·검색어를 버렸다.
+사용자가 늘어도 '어떤 검색어가 헛도는지', '사용자가 본 요약이 맞았는지'를 알 수
+없는 설계였다 — 둘 다 목적어 쪽에 있다. 행 단위 로그로 바꾸고 이걸 고정한다.
 
 확인할 성질:
-  - 명령 인자와 공시번호가 이벤트 이름에서 잘려 나간다
-  - 테이블에 사용자 식별자 칼럼이 아예 없다
-  - 운영자(본인 테스트)는 집계에 섞이지 않는다
-  - 같은 날 같은 이벤트는 행이 늘지 않고 카운터만 오른다
+  - 검색어·공시번호·기업코드가 인자에서 추출된다
+  - 조회 결과 수가 같은 행에 붙는다 — 0건 검색이 드러나야 한다
+  - 요약 열람은 그때 보여준 요약과 생성 경로(원문 길이 포함)를 남긴다
+  - 운영자 행동은 기록하되 플래그로 구분된다(사업 지표에서 빠진다)
+  - /deletedata가 이용 기록까지 지운다
   - 기록이 실패해도 사용자 요청은 계속된다
 """
 import asyncio
@@ -51,7 +50,7 @@ async def send_system_message(chat_id, text): pass
 async def send_alert(*a, **k): return True
 async def send_html_message(chat_id, html_text): return True
 def escape_html(t): return t
-def build_disclosure_message(*a): return ""
+def build_disclosure_message(*a): return "msg"
 for name in ("send_system_message", "send_alert", "send_html_message",
              "escape_html", "build_disclosure_message"):
     setattr(notif, name, locals()[name])
@@ -59,8 +58,8 @@ sys.modules["notifier"] = notif
 
 from sqlalchemy import select  # noqa: E402
 from database import AsyncSessionLocal, init_db  # noqa: E402
-from models import UsageDaily, User  # noqa: E402
-from services import stats_service, usage_service  # noqa: E402
+from models import UsageEvent, User  # noqa: E402
+from services import disclosure_service, stats_service, usage_service, user_service  # noqa: E402
 import bot  # noqa: E402
 
 failures = []
@@ -73,93 +72,192 @@ def check(label, actual, expected=True):
         failures.append(label)
 
 
+_next_uid = [1000]
+
+
+class FakeMessage:
+    def __init__(self, text=None):
+        self.text = text
+        self.replies = []
+
+    async def reply_text(self, text, **kwargs):
+        self.replies.append(text)
+
+
+class FakeQuery:
+    def __init__(self, data, chat_id):
+        self.data = data
+        self.from_user = type("U", (), {"id": chat_id})()
+        self.message = FakeMessage()
+
+    async def answer(self, *a, **k):
+        pass
+
+
 class FakeUpdate:
     def __init__(self, chat_id="g2", text=None, data=None):
+        _next_uid[0] += 1
+        self.update_id = _next_uid[0]
         self.effective_chat = type("C", (), {"id": chat_id, "first_name": ""})()
-        self.message = type("M", (), {"text": text})() if text is not None else None
-        self.callback_query = type("Q", (), {"data": data})() if data is not None else None
+        self.message = FakeMessage(text) if text is not None else None
+        self.callback_query = FakeQuery(data, chat_id) if data is not None else None
 
 
-async def rows():
+class FakeContext:
+    def __init__(self, args=None):
+        self.args = args or []
+
+
+async def events(**where):
     async with AsyncSessionLocal() as s:
-        return (await s.execute(select(UsageDaily))).scalars().all()
+        q = select(UsageEvent)
+        for k, v in where.items():
+            q = q.where(getattr(UsageEvent, k) == v)
+        return (await s.execute(q.order_by(UsageEvent.created_at))).scalars().all()
+
+
+class FakeResult:
+    """disclosure_service.QueryResult와 같은 모양."""
+    def __init__(self, items, query, before):
+        self.items, self.query, self.total_before_query = items, query, before
+        self.scope, self.date = "market", None
+
+    @property
+    def filtered_to_empty(self):
+        return not self.items and self.total_before_query > 0
+
+    def date_label(self):
+        return "오늘"
+
+    def header(self):
+        return "헤더"
 
 
 async def main():
     await init_db()
 
-    # ── 테이블에 사람이 없다 ─────────────────────────────────────────
-    cols = {c.name for c in UsageDaily.__table__.columns}
-    check("사용자 식별자 칼럼 없음", "chat_id" in cols, False)
-    check("담는 건 날짜·이벤트·횟수뿐", cols, {"id", "day", "event", "count"})
+    # ── 인자 추출 ────────────────────────────────────────────────────
+    parse = usage_service.parse
+    check("검색어 추출", parse(FakeUpdate(text="/market 카카오 유상증자")),
+          {"event": "market", "query": "카카오 유상증자"})
+    check("공시번호 추출", parse(FakeUpdate(data="view:20260918000123")),
+          {"event": "view", "rcept_no": "20260918000123"})
+    check("기업코드 추출", parse(FakeUpdate(data="toggle:00126380")),
+          {"event": "toggle", "corp_code": "00126380"})
+    check("해제는 코드와 이름", parse(FakeUpdate(data="remove:00126380:삼성전자")),
+          {"event": "remove", "corp_code": "00126380", "corp_name": "삼성전자"})
+    check("페이지 오프셋", parse(FakeUpdate(data="page:240"))["detail"], {"offset": 240})
+    check("토픽", parse(FakeUpdate(data="topic:공급계약"))["detail"], {"topic": "공급계약"})
+    check("인자 없는 명령", parse(FakeUpdate(text="/my")), {"event": "my"})
+    check("봇 멘션 제거", parse(FakeUpdate(text="/start@forg_alert_bot"))["event"], "start")
+    check("일반 대화는 기록 안 함", parse(FakeUpdate(text="안녕")), None)
 
-    # ── 이벤트 이름: 목적어를 잘라낸다 ───────────────────────────────
-    name = usage_service.event_name
-    check("검색어는 남지 않는다", name(FakeUpdate(text="/market 카카오 유상증자")), "market")
-    check("공시번호는 남지 않는다", name(FakeUpdate(data="view:20260918000123")), "view")
-    check("페이지 오프셋도 버린다", name(FakeUpdate(data="page:240")), "page")
-    check("기업코드도 버린다", name(FakeUpdate(data="toggle:00126380")), "toggle")
-    check("콜론 없는 콜백", name(FakeUpdate(data="confirm_add")), "confirm_add")
-    check("봇 멘션 제거", name(FakeUpdate(text="/start@forg_alert_bot")), "start")
-    check("대문자 정규화", name(FakeUpdate(text="/MY")), "my")
-    check("일반 대화는 이벤트 아님", name(FakeUpdate(text="안녕")), "")
-    check("빈 업데이트도 안전", name(FakeUpdate()), "")
+    # ── 훅: 한 행, 운영자는 플래그 ───────────────────────────────────
+    await bot._record_usage(FakeUpdate(chat_id="g2", text="/market 카카오"), None)
+    await bot._record_usage(FakeUpdate(chat_id="op-chat", text="/market 테스트"), None)
+    rows = await events(event="market")
+    check("행 단위로 쌓인다", len(rows), 2)
+    check("사용자 행은 운영자 아님", [r.is_operator for r in rows if r.chat_id == "g2"], [False])
+    check("운영자 행은 플래그", [r.is_operator for r in rows if r.chat_id == "op-chat"], [True])
+    check("chat_id 저장", rows[0].chat_id, "g2")
 
-    # ── 운영자는 섞이지 않는다 ───────────────────────────────────────
-    check("운영자 조작은 기록 안 함", await usage_service.record("op-chat", "my"), False)
-    check("운영자 기록 후에도 행 없음", len(await rows()), 0)
-    check("빈 이벤트는 기록 안 함", await usage_service.record("g2", ""), False)
+    # ── 조회: 결과 수가 같은 행에 붙는다 ─────────────────────────────
+    u = FakeUpdate(chat_id="g2", text="/market 한미반도체")
+    await bot._record_usage(u, None)
+    u.message = FakeMessage("/market 한미반도체")
+    await bot._send_query_result(u, FakeResult([], "한미반도체", before=259))
+    row = (await events(query="한미반도체"))[0]
+    check("0건 검색의 결과 수", row.result_count, 0)
+    check("검색어 없을 땐 있었다는 것도 남김", row.detail["before_query"], 259)
+    check("'검색어가 다 걸러냈다' 표시", row.detail["filtered_to_empty"], True)
 
-    # ── 사용자: 같은 날 같은 이벤트는 카운터만 오른다 ────────────────
-    for _ in range(3):
-        await usage_service.record("g2", "view")
-    await usage_service.record("g2", "my")
-    got = {(r.day, r.event): r.count for r in await rows()}
-    check("행은 (날짜,이벤트)당 하나", len(got), 2)
-    check("반복은 카운터 증가", got[("20260918", "view")], 3)
-    check("다른 이벤트는 별도", got[("20260918", "my")], 1)
-    check("날짜는 KST", all(d == "20260918" for d, _ in got))
+    u = FakeUpdate(chat_id="g2", text="/market 공급계약")
+    await bot._record_usage(u, None)
+    items = [{"rcept_no": f"R{i}", "corp_name": "X", "report_nm": "Y"} for i in range(12)]
+    await bot._send_query_result(u, FakeResult(items, "공급계약", before=259))
+    check("결과 있는 검색의 결과 수", (await events(query="공급계약"))[0].result_count, 12)
 
-    # ── 훅: 기록이 깨져도 사용자 요청은 계속된다 ─────────────────────
-    orig = usage_service.record
+    # ── 요약 열람: 그때 보여준 요약과 경로 ───────────────────────────
+    async def fake_summary(receipt_no, hint=None):
+        return {"corp_name": "SK하이닉스", "report_nm": "단일판매ㆍ공급계약체결",
+                "summary": "[단일판매·공급계약체결]\n• 계약금액: 1원", "dart_url": "",
+                "resolved": None, "path": "raw", "source_len": 0}
+    orig = disclosure_service.summarize_by_receipt
+    disclosure_service.summarize_by_receipt = fake_summary
+    try:
+        bot.disclosure_cache["20260918000123"] = {"corp_name": "SK하이닉스", "corp_code": "00164779"}
+        u = FakeUpdate(chat_id="g2", data="view:20260918000123")
+        await bot._record_usage(u, None)
+        await bot.view_disclosure_callback(u, None)
+    finally:
+        disclosure_service.summarize_by_receipt = orig
+    row = (await events(event="view"))[0]
+    check("열람 공시번호", row.rcept_no, "20260918000123")
+    check("열람 기업명", row.corp_name, "SK하이닉스")
+    check("열람 기업코드", row.corp_code, "00164779")
+    check("그때 보여준 요약 원문", row.detail["summary"].startswith("[단일판매"))
+    check("생성 경로", row.detail["path"], "raw")
+    check("원문 길이(0 = 빈 원문)", row.detail["source_len"], 0)
+
+    # ── 보강은 훅이 넣은 detail을 지우지 않는다 ──────────────────────
+    u = FakeUpdate(chat_id="g2", data="page:20")
+    await bot._record_usage(u, None)
+    await usage_service.enrich(u, detail={"extra": 1})
+    check("detail 병합", (await events(event="page"))[0].detail, {"offset": 20, "extra": 1})
+
+    # ── 실패해도 사용자 요청은 계속 ──────────────────────────────────
+    orig_record = usage_service.record
     async def boom(*a, **k):
         raise RuntimeError("db down")
     usage_service.record = boom
     try:
-        await bot._record_usage(FakeUpdate(text="/my"), None)   # 예외가 새면 실패
+        await bot._record_usage(FakeUpdate(text="/my"), None)
         check("기록 실패를 삼킨다", True)
     except Exception as e:
         check("기록 실패를 삼킨다", f"예외 누출: {e}", True)
     finally:
-        usage_service.record = orig
+        usage_service.record = orig_record
+    try:
+        await usage_service.enrich(FakeUpdate(text="/my"), result_count=1)   # 대응 행 없음
+        check("대응 행 없는 보강도 조용히", True)
+    except Exception as e:
+        check("대응 행 없는 보강도 조용히", f"예외 누출: {e}", True)
 
-    await bot._record_usage(FakeUpdate(chat_id="g2", text="/market 삼성"), None)
-    got = {(r.day, r.event): r.count for r in await rows()}
-    check("훅을 통해서도 동사만 기록", got.get(("20260918", "market")), 1)
+    # 실제로 났던 버그: 보강 인자를 만들며 결과 객체 속성을 보호 구간 밖에서 읽어,
+    # scope가 없는 결과가 오자 사용자가 조회 결과를 통째로 못 받았다.
+    class Bare:
+        items = []
+    try:
+        await bot._record_query_result(FakeUpdate(text="/my"), Bare())
+        check("속성 빠진 결과도 조회를 깨뜨리지 않음", True)
+    except Exception as e:
+        check("속성 빠진 결과도 조회를 깨뜨리지 않음", f"예외 누출: {e}", True)
 
-    # ── /stats 출력 ──────────────────────────────────────────────────
+    # ── /stats: 운영자 제외, 0건 검색·품질 경보 표시 ────────────────
     async with AsyncSessionLocal() as s:
         s.add(User(chat_id="g2", first_name="건수"))
+        s.add(User(chat_id="op-chat", first_name="누나"))
         await s.commit()
     data = await stats_service.collect_stats()
-    check("사용 집계 포함", data["usage"]["events"]["view"], 3)
-    check("사용한 날 집계", data["usage"]["active_days"], 1)
+    usage = data["usage"]
+    check("사업 지표는 운영자 제외(이용자 수)", usage["users"], 1)
+    check("운영자 검색어는 집계에 없음",
+          [x["query"] for x in usage["searches"] if x["query"] == "테스트"], [])
+    zero = [x["query"] for x in usage["searches"] if x["zero"]]
+    check("0건 검색어가 드러난다", zero, ["한미반도체"])
+    check("원문 없이 나간 요약이 경보로", usage["empty_source"], ["20260918000123"])
     text = stats_service.format_stats(data)
-    check("사용 섹션 표시", "기능 사용" in text)
-    check("사람이 읽는 라벨", "요약 열람 3" in text)
-    check("운영자 제외 명시", "운영자 제외" in text)
-    check("무엇을 기록 안 하는지 명시", "어느 기업인지는 기록하지 않습니다" in text)
-    check("발송과 사용을 구분해 안내", "실제로 쓰는지는 '기능 사용'을 보세요" in text)
+    check("0건 경고 표시", "⚠️ 0건: 한미반도체" in text)
+    check("품질 경보 표시", "원문 없이 요약 1건: 20260918000123" in text)
+    check("많이 연 공시 표시", "SK하이닉스 단일판매ㆍ공급계약체결 ×1" in text)
+    check("검색어 평균 결과", "공급계약 ×1 · 12건" in text)
 
-    # 배포 직후의 실제 상태: 사용자는 있는데 기록은 아직 0
-    fresh = stats_service.format_stats({
-        "users": [{"chat_id": "g2", "first_name": "건수", "is_active": True,
-                   "joined": None, "watchlist": 4, "topics": ["공급계약"],
-                   "sent": 37, "last_sent": None, "feedback": 1, "last_action": None}],
-        "usage": {"window": 14, "events": {}, "active_days": 0, "last_day": None},
-        "totals": {"users": 1, "active": 1, "sent": 37, "open_feedback": 1}})
-    check("기록 없을 때 안내", "아직 기록 없음" in fresh)
-    check("기록 0이어도 발송 수치는 그대로", "받은 알림: 37건" in fresh)
+    # ── /deletedata가 이용 기록까지 지운다 ───────────────────────────
+    before = len(await events(chat_id="g2"))
+    counts = await user_service.delete_user_data("g2")
+    check("삭제 대상에 이용 기록 포함", counts["usage"], before)
+    check("삭제 후 남은 이용 기록 없음", len(await events(chat_id="g2")), 0)
+    check("다른 사용자의 기록은 남음", len(await events(chat_id="op-chat")) > 0)
 
     if failures:
         print(f"\n{len(failures)}건 실패: {failures}")

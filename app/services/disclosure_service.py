@@ -213,11 +213,15 @@ async def summarize_by_receipt(receipt_no: str, hint: dict | None = None) -> dic
     if corp_code and rcept_dt:
         typed_data = await fetch_typed_disclosure(corp_code, receipt_no, report_nm, rcept_dt)
 
+    # 어느 경로로 요약했는지 남긴다 — 사용 기록이 이걸 그대로 싣는다. 원문 길이
+    # 0은 '크롤링이 비었는데 요약은 나갔다'는 뜻이고, KRX 문서 사건(#75)과 같은 부류다.
     if typed_data:
         summary = await summarize_typed_disclosure(corp_name, report_nm, typed_data)
+        path, source_len = "typed", None
     else:
         content = await fetch_disclosure_detail(receipt_no)
         summary = await summarize_disclosure(corp_name, report_nm, content)
+        path, source_len = "raw", len(content or "")
 
     dart_url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt_no}"
     result = {
@@ -226,6 +230,8 @@ async def summarize_by_receipt(receipt_no: str, hint: dict | None = None) -> dic
         "summary": summary,
         "dart_url": dart_url,
         "resolved": resolved,
+        "path": path,
+        "source_len": source_len,
     }
 
     # 실패/한도 폴백 요약은 캐시하지 않는다 — 다음 조회에서 재시도 가능해야 함
