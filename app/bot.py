@@ -5,10 +5,12 @@ the telegram interaction; they intentionally stay here (see CLAUDE.md §6-4 —
 moving them to shared storage is a later SaaS-transition task).
 """
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
+                          ContextTypes, TypeHandler)
 from config import OPERATOR_CHAT_IDS, TELEGRAM_BOT_TOKEN
 from services import (corp_service, disclosure_service, feedback_service, query_service,
-                      stats_service, subscription_service, user_service,
+                      stats_service, subscription_service, usage_service,
+                      user_service,
                       watchlist_service)
 from topics import TOPICS
 
@@ -617,6 +619,22 @@ async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("접수했습니다. 확인 후 반영하겠습니다. 감사합니다 🙏")
 
 
+async def _record_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """모든 업데이트 앞에서 '동사'만 한 번 센다 (group=-1, 흐름은 막지 않는다).
+
+    핸들러 20곳에 로깅을 심으면 새 명령을 추가할 때마다 빠뜨린다. 앞단에서
+    한 번 보는 편이 누락이 없다. 기록 실패가 사용자 요청을 깨뜨려선 안 되므로
+    어떤 예외도 삼킨다 — 이건 부가 기능이고 서비스 본체가 아니다.
+    """
+    try:
+        chat = update.effective_chat
+        if chat is None:
+            return
+        await usage_service.record(str(chat.id), usage_service.event_name(update))
+    except Exception as e:
+        print(f"사용 기록 실패(무시): {type(e).__name__}: {e}")
+
+
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """운영자 전용 사용 현황.
 
@@ -731,6 +749,8 @@ async def cancel_delete_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 def create_bot_app() -> Application:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    # 사용 기록은 다른 핸들러보다 먼저, 그리고 흐름을 막지 않게 별도 그룹에 둔다.
+    app.add_handler(TypeHandler(Update, _record_usage), group=-1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add))
     app.add_handler(CommandHandler("remove", remove))

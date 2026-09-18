@@ -166,3 +166,24 @@ class DisclosureRelation(Base):
     relation_type = Column(String, nullable=False)  # correction_of
     confidence = Column(String, nullable=False, default="rule")
     created_at = Column(DateTime(timezone=True), default=now_utc)
+
+
+class UsageDaily(Base):
+    """날짜별 기능 사용 횟수 — 사용자 식별자를 담지 않는다.
+
+    이게 필요한 이유: 이 서비스는 '우리가 보낸 것'만 기록해서, 사용자가 실제로
+    쓰는지 알 방법이 없었다. 발송량은 그날 공시가 많았다는 뜻일 뿐이다.
+
+    담지 않는 것이 설계의 핵심이다. 무엇을 눌렀는지(동사)만 세고, 무엇에 대해
+    눌렀는지(기업·공시번호·검색어)는 남기지 않는다 — 첫 사용자가 기관 애널리스트라
+    '오늘 어느 기업을 봤나'는 곧 소속 기관의 리서치 방향이다. chat_id 칼럼도 두지
+    않으므로 행에서 사람으로 되돌아갈 경로 자체가 없고, 시각도 날짜까지만 남긴다.
+    운영자 본인의 조작은 기록하지 않는다 — 테스트가 수치를 오염시키면 쓸모가 없다.
+    """
+    __tablename__ = "usage_daily"
+    __table_args__ = (UniqueConstraint("day", "event", name="uq_usage_daily_day_event"),)
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    day = Column(String, nullable=False, index=True)   # YYYYMMDD (KST)
+    event = Column(String, nullable=False)
+    count = Column(Integer, nullable=False, default=0)

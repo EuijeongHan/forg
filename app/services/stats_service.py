@@ -18,7 +18,18 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 
 from database import AsyncSessionLocal
-from models import Feedback, SeenDisclosure, TopicSubscription, User, Watchlist
+from models import (Feedback, SeenDisclosure, TopicSubscription, UsageDaily,
+                    User, Watchlist)
+
+# 이벤트 이름을 사람이 읽는 말로. 모르는 이름은 그대로 둔다 —
+# 새 명령이 생겼을 때 조용히 빠지는 것보다 날것으로라도 보이는 편이 낫다.
+_EVENT_LABELS = {
+    "view": "요약 열람", "page": "목록 넘김", "topic": "유형 설정",
+    "toggle": "기업 선택", "confirm_add": "등록 확정", "remove": "등록 해제",
+    "my": "/my", "market": "/market", "ask": "/ask", "add": "/add",
+    "list": "/list", "feedback": "/feedback", "inbox": "/inbox",
+    "help": "/help", "start": "/start", "today": "/today(구)",
+}
 
 _KST = ZoneInfo("Asia/Seoul")
 
@@ -36,7 +47,7 @@ def _latest(*values):
     return max(seen) if seen else None
 
 
-async def collect_stats() -> dict:
+async def collect_stats(usage_window: int = 14) -> dict:
     async with AsyncSessionLocal() as session:
         users = (await session.execute(select(User).order_by(User.created_at))).scalars().all()
         watchlists = await _grouped(session, Watchlist)
@@ -49,6 +60,11 @@ async def collect_stats() -> dict:
             select(TopicSubscription.chat_id, TopicSubscription.topic)
         ):
             topics.setdefault(chat_id, []).append(topic)
+
+        usage_rows = await session.execute(select(UsageDaily))
+        usage_by_day: dict[str, dict[str, int]] = {}
+        for row in usage_rows.scalars().all():
+            usage_by_day.setdefault(row.day, {})[row.event] = row.count
 
         open_feedback = await session.scalar(
             select(func.count()).select_from(Feedback).where(Feedback.status == "new")
@@ -75,8 +91,20 @@ async def collect_stats() -> dict:
             ),
         })
 
+    recent_days = sorted(usage_by_day, reverse=True)[:usage_window]
+    totals_by_event: dict[str, int] = {}
+    for day in recent_days:
+        for event, n in usage_by_day[day].items():
+            totals_by_event[event] = totals_by_event.get(event, 0) + n
+
     return {
         "users": rows,
+        "usage": {
+            "window": usage_window,
+            "events": dict(sorted(totals_by_event.items(), key=lambda kv: -kv[1])),
+            "active_days": len(recent_days),
+            "last_day": recent_days[0] if recent_days else None,
+        },
         "totals": {
             "users": len(rows),
             "active": sum(1 for r in rows if r["is_active"]),
@@ -116,8 +144,25 @@ def format_stats(data: dict, now: datetime | None = None) -> str:
         lines.append(f"  마지막 행동: {when(r['last_action'])} · 보낸 요청 {r['feedback']}건")
         lines.append(f"  받은 알림: {r['sent']}건 · 최근 {when(r['last_sent'])}")
 
+    usage = data.get("usage") or {}
+    events = usage.get("events") or {}
+    lines.append(f"\n📈 기능 사용 (최근 {usage.get('window', 14)}일 · 운영자 제외)")
+    if not events:
+        lines.append("  아직 기록 없음 — 누군가 명령이나 버튼을 쓰면 여기 쌓입니다.")
+    else:
+        lines.append("  " + " · ".join(
+            f"{_EVENT_LABELS.get(e, e)} {n}" for e, n in events.items()))
+        last = usage.get("last_day")
+        if last:
+            shown = f"{last[4:6]}/{last[6:8]}"
+            days = (now.date() - datetime.strptime(last, "%Y%m%d").date()).days
+            ago = "오늘" if days == 0 else ("어제" if days == 1 else f"{days}일 전")
+            lines.append(f"  마지막 사용 {shown} ({ago}) · 사용한 날 "
+                         f"{usage.get('active_days', 0)}/{usage.get('window', 14)}일")
+
     lines.append(
-        "\n※ '받은 알림'은 우리가 보낸 양입니다. 공시가 많은 날 늘어날 뿐,"
-        "\n열어봤다는 뜻이 아닙니다 — 클릭은 기록하지 않습니다."
+        "\n※ '받은 알림'은 우리가 보낸 양이라 공시가 많은 날 늘어납니다."
+        "\n실제로 쓰는지는 '기능 사용'을 보세요. 무엇을 눌렀는지만 세고"
+        "\n누가·어느 기업인지는 기록하지 않습니다."
     )
     return "\n".join(lines)
