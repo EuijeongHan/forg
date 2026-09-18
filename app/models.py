@@ -168,22 +168,33 @@ class DisclosureRelation(Base):
     created_at = Column(DateTime(timezone=True), default=now_utc)
 
 
-class UsageDaily(Base):
-    """날짜별 기능 사용 횟수 — 사용자 식별자를 담지 않는다.
+class UsageEvent(Base):
+    """사용자가 한 일 — 평가·품질 개선의 원자료.
 
-    이게 필요한 이유: 이 서비스는 '우리가 보낸 것'만 기록해서, 사용자가 실제로
-    쓰는지 알 방법이 없었다. 발송량은 그날 공시가 많았다는 뜻일 뿐이다.
+    이 서비스는 오랫동안 '보낸 것'만 기록했다. 그래서 어떤 검색어가 헛도는지,
+    사용자가 연 요약이 제대로 나왔는지 알 방법이 없었다. 이 테이블이 그 둘을 잇는다.
+      - query + result_count: 0건 검색은 키워드·필터가 헛돈다는 가장 직접적인 신호
+      - rcept_no + detail.summary: 사용자가 '그때 실제로 본' 요약. 코드를 고친 뒤
+        다시 생성하면 다른 답이 나오므로, 평가는 당시 보여준 것을 기준으로 한다
 
-    담지 않는 것이 설계의 핵심이다. 무엇을 눌렀는지(동사)만 세고, 무엇에 대해
-    눌렀는지(기업·공시번호·검색어)는 남기지 않는다 — 첫 사용자가 기관 애널리스트라
-    '오늘 어느 기업을 봤나'는 곧 소속 기관의 리서치 방향이다. chat_id 칼럼도 두지
-    않으므로 행에서 사람으로 되돌아갈 경로 자체가 없고, 시각도 날짜까지만 남긴다.
-    운영자 본인의 조작은 기록하지 않는다 — 테스트가 수치를 오염시키면 쓸모가 없다.
+    chat_id는 다른 테이블과 같은 수준으로 그대로 둔다. 여기서만 해시로 가려도
+    watchlist가 이미 chat_id→관심기업을 들고 있어 보호되는 것이 없다.
+    FK는 걸지 않는다 — 첫 명령(/start)은 사용자 행이 생기기 전에 기록된다.
+
+    is_operator: 사업 지표에서는 빼되, 운영자가 요약을 열어 품질을 확인한 기록은
+    평가에 쓴다. 운영자 ID가 바뀌어도 과거 행의 의미가 흔들리지 않게 행에 박는다.
     """
-    __tablename__ = "usage_daily"
-    __table_args__ = (UniqueConstraint("day", "event", name="uq_usage_daily_day_event"),)
+    __tablename__ = "usage_events"
 
     id = Column(String, primary_key=True, default=gen_uuid)
-    day = Column(String, nullable=False, index=True)   # YYYYMMDD (KST)
-    event = Column(String, nullable=False)
-    count = Column(Integer, nullable=False, default=0)
+    update_id = Column(String, nullable=True, index=True)  # 같은 업데이트의 보강 연결
+    chat_id = Column(String, nullable=False, index=True)
+    is_operator = Column(Boolean, nullable=False, default=False)
+    event = Column(String, nullable=False, index=True)
+    query = Column(Text, nullable=True)
+    corp_code = Column(String, nullable=True)
+    corp_name = Column(String, nullable=True)
+    rcept_no = Column(String, nullable=True, index=True)
+    result_count = Column(Integer, nullable=True)
+    detail = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=now_utc, index=True)

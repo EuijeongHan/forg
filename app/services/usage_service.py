@@ -1,68 +1,110 @@
-"""사용 흔적 집계 — 무엇을 눌렀는지만, 누가·무엇에 대해는 남기지 않는다.
+"""사용 기록 — 평가·품질 개선의 원자료.
 
-운영자가 사용자에게 매번 "쓰고 있냐"고 물어볼 수 없어서 만들었다. 그런데 이
-서비스의 사용자는 기관 애널리스트고, '오늘 어느 기업을 열어봤나'는 소속 기관의
-리서치 방향이다. 그래서 동사만 센다:
+무엇을 남기나 (UsageEvent 한 행 = 사용자 행동 하나):
+  - 명령·버튼, 검색어, 기업, 공시번호, 시각
+  - 조회의 결과 수 — 0건 검색은 키워드·필터가 헛돈다는 가장 직접적인 신호다
+  - 요약을 열었다면 그때 보여준 요약 원문과 생성 경로(정형/원문, 원문 길이)
 
-  기록한다   명령·버튼 이름, 날짜(KST), 횟수
-  기록 안 한다  사용자 식별자, 정확한 시각, 기업명·공시번호·검색어
+기록은 두 단계다. 앞단 훅(record)이 모든 업데이트를 받아 인자까지 파싱해 한 행을
+만든다 — 핸들러 20곳에 심으면 나중에 추가되는 명령이 빠진다. 결과 수나 요약처럼
+핸들러가 일을 끝내야 알 수 있는 값은 그 핸들러가 같은 행에 덧붙인다(enrich).
+둘은 텔레그램 update_id로 이어진다.
 
-행 단위 이벤트를 쌓지 않고 (날짜, 이벤트) 카운터를 올린다. 행에 사람이 없으니
-재식별할 대상이 없고, 나중에 사용자가 늘어도 그대로 집계로 읽힌다.
-운영자 본인의 조작은 제외한다 — 테스트가 섞이면 수치를 믿을 수 없다.
+어느 단계든 실패해도 사용자 요청을 깨뜨리지 않는다 — 기록은 부가 기능이다.
 """
-from sqlalchemy import select, update
+from sqlalchemy import update as sql_update
 
 from config import OPERATOR_CHAT_IDS
 from database import AsyncSessionLocal
-from models import UsageDaily
+from models import UsageEvent
+
+_QUERY_MAX = 500
+_SUMMARY_MAX = 8000
 
 
-def event_name(update_obj) -> str:
-    """텔레그램 업데이트에서 '동사'만 뽑는다. 인자는 버린다.
-
-    '/market 카카오'는 'market'이 되고 검색어는 사라진다. 'view:20260918000123'은
-    'view'가 되고 공시번호는 사라진다 — 무엇을 봤는지가 남으면 안 되는 부분이다.
-    """
+def parse(update_obj) -> dict | None:
+    """업데이트에서 이벤트와 그 인자를 뽑는다. 명령·버튼이 아니면 None."""
     query = getattr(update_obj, "callback_query", None)
-    if query is not None and getattr(query, "data", None):
-        return str(query.data).split(":", 1)[0][:40]
+    data = getattr(query, "data", None) if query is not None else None
+    if data:
+        head, _, rest = str(data).partition(":")
+        ev: dict = {"event": head[:40]}
+        if head == "view":
+            ev["rcept_no"] = rest or None
+        elif head == "toggle":
+            ev["corp_code"] = rest or None
+        elif head == "remove":
+            code, _, name = rest.partition(":")
+            ev["corp_code"], ev["corp_name"] = code or None, name or None
+        elif head == "page":
+            ev["detail"] = {"offset": int(rest)} if rest.isdigit() else None
+        elif head == "topic":
+            ev["detail"] = {"topic": rest}
+        elif head == "fbdone":
+            ev["detail"] = {"feedback_id": rest}
+        return ev
 
     message = getattr(update_obj, "message", None)
     text = (getattr(message, "text", "") or "").strip()
-    if text.startswith("/"):
-        return text[1:].split()[0].split("@")[0][:40].lower()
-    return ""
+    if not text.startswith("/"):
+        return None
+    cmd, _, args = text[1:].partition(" ")
+    ev = {"event": cmd.split("@")[0].lower()[:40]}
+    if args.strip():
+        ev["query"] = args.strip()[:_QUERY_MAX]
+    return ev
 
 
-async def record(chat_id: str, event: str) -> bool:
-    """(날짜, 이벤트) 카운터를 1 올린다. 운영자면 기록하지 않는다."""
-    if not event or str(chat_id) in OPERATOR_CHAT_IDS:
+def _update_key(update_obj) -> str | None:
+    uid = getattr(update_obj, "update_id", None)
+    return str(uid) if uid is not None else None
+
+
+async def record(update_obj) -> bool:
+    """업데이트 하나를 한 행으로 남긴다."""
+    ev = parse(update_obj)
+    chat = getattr(update_obj, "effective_chat", None)
+    if not ev or chat is None:
         return False
-
-    from dart import today_kst
-    day = today_kst()
-
+    chat_id = str(chat.id)
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            update(UsageDaily)
-            .where(UsageDaily.day == day, UsageDaily.event == event)
-            .values(count=UsageDaily.count + 1)
-        )
-        if result.rowcount == 0:
-            session.add(UsageDaily(day=day, event=event, count=1))
+        session.add(UsageEvent(
+            update_id=_update_key(update_obj),
+            chat_id=chat_id,
+            is_operator=chat_id in OPERATOR_CHAT_IDS,
+            **ev,
+        ))
         await session.commit()
     return True
 
 
-async def recent(days: int = 14) -> list[dict]:
-    """최근 N일치를 날짜 내림차순으로. 각 날짜의 이벤트별 횟수."""
-    async with AsyncSessionLocal() as session:
-        rows = (await session.execute(
-            select(UsageDaily).order_by(UsageDaily.day.desc())
-        )).scalars().all()
+async def enrich(update_obj, *, detail: dict | None = None, **fields) -> None:
+    """핸들러가 일을 끝낸 뒤에야 아는 값을 같은 행에 덧붙인다.
 
-    by_day: dict[str, dict[str, int]] = {}
-    for row in rows:
-        by_day.setdefault(row.day, {})[row.event] = row.count
-    return [{"day": d, "events": by_day[d]} for d in sorted(by_day, reverse=True)[:days]]
+    detail은 기존 detail에 병합한다(훅이 넣은 offset·topic 등을 지우지 않는다).
+    기록이 없으면(훅 실패 등) 조용히 넘어간다.
+    """
+    key = _update_key(update_obj)
+    if key is None:
+        return
+    if isinstance(detail, dict) and "summary" in detail and detail["summary"]:
+        detail = {**detail, "summary": str(detail["summary"])[:_SUMMARY_MAX]}
+
+    async with AsyncSessionLocal() as session:
+        if detail:
+            from sqlalchemy import select
+            row = (await session.execute(
+                select(UsageEvent).where(UsageEvent.update_id == key)
+            )).scalars().first()
+            if row is None:
+                return
+            row.detail = {**(row.detail or {}), **detail}
+            for name, value in fields.items():
+                setattr(row, name, value)
+        elif fields:
+            await session.execute(
+                sql_update(UsageEvent).where(UsageEvent.update_id == key).values(**fields)
+            )
+        else:
+            return
+        await session.commit()
