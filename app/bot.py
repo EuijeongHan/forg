@@ -8,7 +8,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from config import OPERATOR_CHAT_IDS, TELEGRAM_BOT_TOKEN
 from services import (corp_service, disclosure_service, feedback_service, query_service,
-                      subscription_service, user_service, watchlist_service)
+                      stats_service, subscription_service, user_service,
+                      watchlist_service)
 from topics import TOPICS
 
 pending_selections: dict[str, dict[str, str]] = {}
@@ -616,6 +617,25 @@ async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("접수했습니다. 확인 후 반영하겠습니다. 감사합니다 🙏")
 
 
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """운영자 전용 사용 현황.
+
+    사용자에게 매번 "쓰고 있냐"고 물어볼 수 없어서 만들었다. 새로 수집하는 것은
+    없고 기존 테이블만 읽는다. 열어봤는지는 여기서도 알 수 없으며, 그 한계를
+    출력 말미에 그대로 적는다 — 발송량을 참여도로 읽는 것이 이 화면의 유일한
+    오독 경로다.
+
+    /help에는 넣지 않는다. 운영자만 쓰는 명령이 사용자 안내에 섞이면 소음이다.
+    """
+    chat_id = str(update.effective_chat.id)
+    if chat_id not in OPERATOR_CHAT_IDS:
+        await update.message.reply_text("운영자 전용 명령입니다.")
+        return
+
+    data = await stats_service.collect_stats()
+    await update.message.reply_text(stats_service.format_stats(data))
+
+
 async def inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """미처리 사용자 요청 확인.
 
@@ -722,6 +742,7 @@ def create_bot_app() -> Application:
     app.add_handler(CommandHandler("feedback", feedback))
     app.add_handler(CommandHandler("topic", topic))
     app.add_handler(CommandHandler("inbox", inbox))
+    app.add_handler(CommandHandler("stats", stats))
     # 구 명령 별칭 — 기존 사용자의 손버릇을 깨지 않는다
     app.add_handler(CommandHandler("today", legacy_today))
     app.add_handler(CommandHandler("mytoday", legacy_today))
