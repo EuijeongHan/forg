@@ -98,7 +98,10 @@ async def main():
         await process_disclosures()
     check("P0-3a: 회복 후 재발 시 재경보", len(state["system_msgs"]) == 2)
 
-    # --- P0-3b: 평일 장중 공시 0건 지속 경보 (임계 10) ---
+    # --- P0-3b: 평일 장중 '응답은 정상인데 빈 목록' 지속 경보 (임계 10) ---
+    # 스텁이 돌려주는 맨 리스트에는 dart_empty가 없다 = DART가 '없다'고 답한 게
+    # 아니라 목록만 비어 있는 상태. 이건 여전히 경보 대상이다.
+    # (DART가 013으로 확인해 준 휴일 케이스는 test_dart_failure_propagation에서)
     state["mode"] = "empty"
     await process_disclosures()  # 실패 스트릭 리셋용 성공 1회 (장외 고정이라 empty 미카운트)
     tasks._empty_streak = 0
@@ -110,7 +113,7 @@ async def main():
     check("P0-3b: 임계 미만(9사이클)엔 경보 없음", len(state["system_msgs"]) == base)
     await process_disclosures()  # 10사이클째
     check("P0-3b: 10사이클째 경보 1건", len(state["system_msgs"]) == base + 1
-          and "공시 0건" in state["system_msgs"][-1][1])
+          and "비어 있습니다" in state["system_msgs"][-1][1])
     await process_disclosures()  # 11사이클 — 중복 금지
     check("P0-3b: 경보는 1회만", len(state["system_msgs"]) == base + 1)
 

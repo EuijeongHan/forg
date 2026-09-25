@@ -44,6 +44,7 @@ poll_status: dict = {
     "last_error": None,
     "fail_streak": 0,
     "empty_streak": 0,
+    "last_empty_reason": None,   # dart_013(휴장·휴일) | no_items(형식 이상)
 }
 
 
@@ -124,18 +125,28 @@ async def _run_pipeline():
     print(f"공시 {len(disclosures or [])}건 수집 ({'전체 스윕' if full_sweep else '증분'})")
     poll_status["last_fetch_count"] = len(disclosures or [])
     if not disclosures:
-        if _is_business_hours_kst():
+        # DART가 013으로 '없다'고 답했으면 그건 답이지 침묵이 아니다 — 휴장·주말·
+        # 공휴일. 달력을 들고 있지 않아도 DART가 매일 알려준다. 경보는 '응답은
+        # 정상인데 목록이 비어 있는' 경우(응답 형식 변경 등)에만 울린다.
+        confirmed_empty = getattr(disclosures, "dart_empty", False)
+        poll_status["last_empty_reason"] = "dart_013" if confirmed_empty else "no_items"
+        if confirmed_empty:
+            _empty_streak = 0
+            _empty_alerted = False
+            print("공시 없음 (DART 013 — 휴장·휴일)")
+        elif _is_business_hours_kst():
             _empty_streak += 1
             if _empty_streak >= EMPTY_ALERT_THRESHOLD and not _empty_alerted:
                 _empty_alerted = True
                 await _notify_operator(
-                    f"⚠️ forG 자가 경보: 평일 장중 공시 0건이 {_empty_streak}사이클 지속 — "
-                    "DART 연동(키·네트워크·응답 형식) 점검이 필요합니다."
+                    f"⚠️ forG 자가 경보: 평일 장중 DART 응답은 정상인데 공시 목록이 "
+                    f"{_empty_streak}사이클 연속 비어 있습니다 — 응답 형식·키 점검이 필요합니다."
                 )
         poll_status["last_result"] = "empty"
         poll_status["empty_streak"] = _empty_streak
         poll_status["last_alert_count"] = 0
-        print("새로운 공시 없음")
+        if not confirmed_empty:
+            print("새로운 공시 없음")
         return
     _empty_streak = 0
     _empty_alerted = False
