@@ -135,6 +135,42 @@ async def main():
     check("정상 빈 결과 → last_success_at 갱신",
           tasks.poll_status["last_success_at"] is not None, True)
 
+    # ── 빈 결과의 두 얼굴 (2026-09-25 추석 오경보) ───────────────────
+    # 추석 연휴에 '평일 장중 공시 0건' 경보가 울렸다. 그때 DART는 0.1초에 013을
+    # 정상 반환하고 있었다 — 장애가 아니라 답이었다. 오경보가 반복되면 운영자가
+    # 경보를 무시하게 되고 그게 진짜 장애를 묻는다.
+    check("013은 '확정된 빈 결과'로 표시",
+          dart.DisclosureList().dart_empty, False)
+    use_responses([FakeResponse({"status": "013", "message": "조회된 데이타가 없습니다."})])
+    rows = await dart.fetch_disclosures_range("20260925", "20260925")
+    check("013 조회는 dart_empty=True", rows.dart_empty, True)
+    use_responses([FakeResponse({"status": "000", "list": [item], "total_page": 1})])
+    rows = await dart.fetch_disclosures_range("20260925", "20260925")
+    check("공시가 있으면 dart_empty=False", rows.dart_empty, False)
+
+    tasks._empty_streak = 0
+    tasks._empty_alerted = False
+    tasks._is_business_hours_kst = lambda *a, **k: True   # 장중으로 고정
+
+    async def holiday(days=1, **_kw):
+        empty = dart.DisclosureList()
+        empty.dart_empty = True
+        return empty
+    tasks.fetch_recent_disclosures = holiday
+    for _ in range(tasks.EMPTY_ALERT_THRESHOLD + 3):
+        await tasks.process_disclosures()
+    check("휴일(013)은 경보 사이클을 쌓지 않음", tasks._empty_streak, 0)
+    check("휴일(013)은 경보를 보내지 않음", tasks._empty_alerted, False)
+    check("휴일 사유가 기록됨", tasks.poll_status["last_empty_reason"], "dart_013")
+
+    async def shape_broke(days=1, **_kw):
+        return dart.DisclosureList()   # 200 정상인데 목록이 빔 — 진짜 이상
+    tasks.fetch_recent_disclosures = shape_broke
+    for _ in range(tasks.EMPTY_ALERT_THRESHOLD):
+        await tasks.process_disclosures()
+    check("응답 정상 + 빈 목록은 경보를 울림", tasks._empty_alerted, True)
+    check("형식 이상 사유가 기록됨", tasks.poll_status["last_empty_reason"], "no_items")
+
     # ── 파트 3: 봇 — 장애를 "공시 없음"으로 위장하지 않음 ───────────
     import bot
     from services import disclosure_service, watchlist_service

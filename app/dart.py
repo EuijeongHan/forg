@@ -36,6 +36,20 @@ async def _get_with_retry(client, url, *, params=None, timeout: float = DART_TIM
     raise last
 
 
+class DisclosureList(list):
+    """조회 결과 + DART가 '013(조회된 데이터 없음)'으로 답했는지.
+
+    빈 결과는 두 가지 뜻을 가진다. DART가 '없다'고 명시한 것(휴장·주말·추석
+    연휴)과, 응답은 정상인데 목록이 비어 있는 것(응답 형식 변경 등 진짜 이상).
+    자가 경보는 둘을 구분해야 한다 — 2026-09-25 추석 연휴에 '평일 장중 공시
+    0건' 경보가 울렸고, 그때 DART는 0.1초에 013을 정상 반환하고 있었다.
+    오경보가 반복되면 운영자가 경보를 무시하게 되고, 그게 진짜 장애를 묻는다.
+
+    list 상속이라 기존 호출부(len·순회·`if not disclosures`)는 그대로 동작한다.
+    """
+    dart_empty: bool = False
+
+
 class DartApiError(Exception):
     """DART 응답이 정상(000)도 빈 결과(013)도 아닌 경우.
 
@@ -146,9 +160,10 @@ async def fetch_disclosures_range(
     다음 사이클이 다시 집어 올릴 수 있어야 한다.
     """
     url = f"{DART_BASE_URL}/list.json"
-    all_disclosures = []
+    all_disclosures = DisclosureList()
     page = 1
     stale_pages = 0   # 새 공시가 하나도 없던 연속 페이지 수
+    saw_013 = False   # DART가 '조회된 데이터 없음'을 명시했는가
 
     async with httpx.AsyncClient() as client:
         while True:
@@ -164,6 +179,7 @@ async def fetch_disclosures_range(
             data = response.json()
             status = data.get("status")
             if status == "013":
+                saw_013 = True
                 break  # 조회 결과 없음 — 정상적인 빈 결과 (§4.1)
             if status != "000":
                 raise DartApiError(f"DART status {status}: {data.get('message', '')}")
@@ -183,6 +199,9 @@ async def fetch_disclosures_range(
                         break
             page += 1
 
+    # 013은 수집된 것이 하나도 없을 때만 '확정된 빈 결과'다. 페이지네이션 끝에서
+    # 나온 013은 앞 페이지에 공시가 있었다는 뜻이므로 빈 결과가 아니다.
+    all_disclosures.dart_empty = saw_013 and not all_disclosures
     return all_disclosures
 
 
