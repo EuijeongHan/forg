@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -21,6 +22,15 @@ _KST = ZoneInfo("Asia/Seoul")
 # 오래된 접수나 '저장은 됐는데 발송 전에 죽은' 공시가 상위 200건 밖으로
 # 밀려나면 다시 볼 기회가 없다. 15분마다 한 번은 전 구간을 다시 훑어
 # 그 창을 15분으로 묶는다. 느린 날의 전체 순회는 ~195초라 매 사이클 할 수 없다.
+# 발송 경로 직렬화. 폴링(60초)·토픽 묶음(10분)·다이제스트(18:30)는 서로 다른
+# 잡이라 APScheduler의 max_instances=1이 '잡 사이'를 막아주지 않는다. 셋 다
+# SeenDisclosure로 '이미 보냈는가'를 확인한 뒤 쓰는 check-then-act이므로,
+# 겹쳐 돌면 둘 다 미발송으로 보고 같은 공시를 두 번 보낸다.
+# 2026-09-29 13:12 실측: uq_seen_disclosure_receipt_chat 유니크 위반 —
+# 제약이 중복 '기록'은 막았지만 그 시점엔 메시지가 이미 두 번 나간 뒤였다.
+# 단일 프로세스 전제(CLAUDE.md §6-4)라 프로세스 내 Lock으로 충분하다.
+_SEND_LOCK = asyncio.Lock()
+
 FULL_SWEEP_INTERVAL = timedelta(minutes=15)
 _last_full_sweep: datetime | None = None
 
@@ -68,7 +78,8 @@ async def process_disclosures():
     global _fail_streak, _fail_alerted
     poll_status["last_run_at"] = _now_kst_iso()
     try:
-        await _run_pipeline()
+        async with _SEND_LOCK:
+            await _run_pipeline()
     except Exception as e:
         _fail_streak += 1
         poll_status["last_result"] = "error"
@@ -315,6 +326,16 @@ DIGEST_MAX_LINES = 30
 
 
 async def send_daily_digest():
+    """다이제스트 발송 — 폴링과 겹치지 않게 _SEND_LOCK 아래에서 돈다.
+
+    셋 다 SeenDisclosure로 미발송을 판정한 뒤 쓰는 check-then-act이라,
+    겹쳐 돌면 같은 공시를 두 번 보낸다(2026-09-29 유니크 위반 실측).
+    """
+    async with _SEND_LOCK:
+        await _send_daily_digest()
+
+
+async def _send_daily_digest():
     """참고 등급 공시를 하루 1회 묶어 보낸다 (18:30 KST 스케줄).
 
     원칙 1(워치리스트 공시는 버리지 않는다)의 나머지 절반이다. 즉시 알림
@@ -335,13 +356,17 @@ async def send_daily_digest():
     window = [today_kst(), kst_date_str(1)]
 
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(User).where(User.is_active == True))
-        users = result.scalars().all()
+        # ORM 객체가 아니라 chat_id만 뽑는다 — 한 사용자가 실패해 rollback이
+        # 일어나면 남은 ORM 객체가 만료돼 다음 순회에서 지연 로딩이 터진다.
+        result = await session.execute(
+            select(User.chat_id).where(User.is_active == True)
+        )
+        chat_ids = list(result.scalars().all())
 
-        for user in users:
+        for chat_id in chat_ids:
             try:
                 result = await session.execute(
-                    select(Watchlist.corp_code).where(Watchlist.chat_id == user.chat_id)
+                    select(Watchlist.corp_code).where(Watchlist.chat_id == chat_id)
                 )
                 corp_codes = set(result.scalars().all())
                 if not corp_codes:
@@ -366,7 +391,7 @@ async def send_daily_digest():
 
                 result = await session.execute(
                     select(SeenDisclosure.receipt_no).where(
-                        SeenDisclosure.chat_id == user.chat_id,
+                        SeenDisclosure.chat_id == chat_id,
                         SeenDisclosure.receipt_no.in_([r.rcept_no for r in reference]),
                     )
                 )
@@ -402,7 +427,7 @@ async def send_daily_digest():
                     if len(pending) > len(shown) else ""
                 )
 
-                sent = await send_html_message(user.chat_id, header + "\n".join(lines) + tail)
+                sent = await send_html_message(chat_id, header + "\n".join(lines) + tail)
                 if not sent:
                     continue  # 기록하지 않는다 → 내일 창에서 재시도
 
@@ -410,16 +435,16 @@ async def send_daily_digest():
                     session.add(SeenDisclosure(
                         id=str(uuid.uuid4()),
                         receipt_no=r.rcept_no,
-                        chat_id=user.chat_id,
+                        chat_id=chat_id,
                         corp_name=r.corp_name,
                         report_nm=r.report_nm,
                         summary="[다이제스트]",
                     ))
                 await session.commit()
-                print(f"다이제스트 발송: chat={user.chat_id} {len(shown)}건 (대기 {len(pending)}건)")
+                print(f"다이제스트 발송: chat={chat_id} {len(shown)}건 (대기 {len(pending)}건)")
             except Exception as e:
                 await session.rollback()
-                print(f"다이제스트 실패 (chat={user.chat_id}): {type(e).__name__}: {e}")
+                print(f"다이제스트 실패 (chat={chat_id}): {type(e).__name__}: {e}")
 
 
 async def run_llm_canary():
@@ -481,6 +506,16 @@ TOPIC_BATCH_MAX = 20
 
 
 async def send_topic_batches():
+    """토픽 묶음 발송 — 폴링과 겹치지 않게 _SEND_LOCK 아래에서 돈다.
+
+    셋 다 SeenDisclosure로 미발송을 판정한 뒤 쓰는 check-then-act이라,
+    겹쳐 돌면 같은 공시를 두 번 보낸다(2026-09-29 유니크 위반 실측).
+    """
+    async with _SEND_LOCK:
+        await _send_topic_batches()
+
+
+async def _send_topic_batches():
     """유형 구독 공시를 묶어서 보낸다 (10분 주기).
 
     낱개 즉시 발송은 "너무 몰아쳐서 놓칠 것 같다"는 실사용자 지적을 받았다.
@@ -515,12 +550,17 @@ async def send_topic_batches():
             users = await subscribers(session, key)
             if not users:
                 continue
+            # 한 사용자가 실패하면 rollback이 세션의 ORM 객체를 전부 만료시키고,
+            # 다음 사용자의 user.chat_id가 지연 로딩을 일으켜 MissingGreenlet으로
+            # 터진다 — 그 사이클의 남은 사용자가 통째로 날아간다(2026-09-30 실측).
+            # 롤백 너머로 ORM 객체를 들고 가지 않는다.
+            chat_ids = [u.chat_id for u in users]
             label = TOPICS.get(key, {}).get("label", key)
-            for user in users:
+            for chat_id in chat_ids:
                 try:
                     result = await session.execute(
                         select(SeenDisclosure.receipt_no).where(
-                            SeenDisclosure.chat_id == user.chat_id,
+                            SeenDisclosure.chat_id == chat_id,
                             SeenDisclosure.receipt_no.in_(
                                 [d.get("rcept_no") for d in items]
                             ),
@@ -550,7 +590,7 @@ async def send_topic_batches():
                     ])
 
                     if not await send_with_keyboard(
-                        user.chat_id, header + "\n".join(lines) + tail, keyboard
+                        chat_id, header + "\n".join(lines) + tail, keyboard
                     ):
                         continue  # 기록하지 않는다 → 다음 주기 재시도
 
@@ -563,17 +603,17 @@ async def send_topic_batches():
                         session.add(SeenDisclosure(
                             id=str(uuid.uuid4()),
                             receipt_no=d.get("rcept_no"),
-                            chat_id=user.chat_id,
+                            chat_id=chat_id,
                             corp_name=d.get("corp_name", ""),
                             report_nm=d.get("report_nm", ""),
                             summary="[유형 구독 묶음]",
                         ))
                     await session.commit()
                     sent_total += len(shown)
-                    print(f"토픽 묶음 발송: {key} chat={user.chat_id} {len(shown)}건")
+                    print(f"토픽 묶음 발송: {key} chat={chat_id} {len(shown)}건")
                 except Exception as e:
                     await session.rollback()
-                    print(f"토픽 묶음 실패 ({key}, chat={user.chat_id}): "
+                    print(f"토픽 묶음 실패 ({key}, chat={chat_id}): "
                           f"{type(e).__name__}: {e}")
 
     poll_status["last_topic_batch_at"] = _now_kst_iso()

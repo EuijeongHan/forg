@@ -386,7 +386,9 @@ async def fetch_rcept_times(date: str) -> dict[str, str]:
             for rcept_no, time_str in matches:
                 result[rcept_no] = time_str
         except Exception as e:
-            print(f"접수 시간 조회 실패: {e}")
+            # 예외 타입까지 남긴다 — 타임아웃은 str(e)가 비어 있어서 메시지만
+            # 찍으면 '접수 시간 조회 실패: '만 남고 원인을 알 수 없다(2026-09-28·29·10-01 실측).
+            print(f"접수 시간 조회 실패: {type(e).__name__}: {e}")
     return result
 
 
