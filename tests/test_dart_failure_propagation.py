@@ -171,6 +171,32 @@ async def main():
     check("응답 정상 + 빈 목록은 경보를 울림", tasks._empty_alerted, True)
     check("형식 이상 사유가 기록됨", tasks.poll_status["last_empty_reason"], "no_items")
 
+    # ── 접수 시간 조회 실패는 '무엇이' 실패했는지 남겨야 한다 ───────
+    # 2026-09-28·29, 10-01 프로덕션 로그에 '접수 시간 조회 실패: '만 세 번
+    # 찍혔다. 타임아웃 예외는 str(e)가 비어 있어서 메시지만 찍으면 원인이
+    # 통째로 사라진다. 이 경로가 죽으면 올빼미 공시(18시 이후 제출) 경고가
+    # 조용히 빠지므로, 최소한 무엇이 터졌는지는 보여야 한다.
+    import io
+    from contextlib import redirect_stdout
+
+    class TimeoutClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, *a, **k):
+            raise httpx.ReadTimeout("")
+
+    dart.httpx.AsyncClient = lambda *a, **k: TimeoutClient()
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        times = await dart.fetch_rcept_times("20260928")
+    logged = buf.getvalue()
+    check("접수 시간 실패는 빈 결과로 흡수(알림은 계속)", times, {})
+    check("실패 로그에 예외 타입", "ReadTimeout" in logged, True)
+
     # ── 파트 3: 봇 — 장애를 "공시 없음"으로 위장하지 않음 ───────────
     import bot
     from services import disclosure_service, watchlist_service

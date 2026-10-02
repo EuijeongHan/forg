@@ -188,6 +188,69 @@ async def main():
     await tasks.send_topic_batches()
     check("묶음 재실행 시 중복 없음", state["batches"], [])
 
+    # ── 파트 3c: 발송 경로가 서로 겹치지 않는다 (2026-09-29 중복 발송) ──
+    # 폴링(60초)·토픽 묶음(10분)·다이제스트(18:30)는 각각 다른 잡이라
+    # max_instances=1이 '잡 사이'를 막지 않는다. 셋 다 SeenDisclosure로
+    # 미발송을 판정한 뒤 쓰는 check-then-act이라, 겹쳐 돌면 둘 다 '아직 안
+    # 보냈다'고 보고 같은 공시를 두 번 보낸다. 프로덕션에서 유니크 위반으로
+    # 드러났는데, 제약이 막은 건 중복 '기록'이고 메시지는 이미 나간 뒤였다.
+    order = []
+
+    async def fake_pipeline():
+        order.append("P시작")
+        await asyncio.sleep(0.01)      # 다른 코루틴에 양보할 틈을 준다
+        order.append("P끝")
+
+    async def fake_batch():
+        order.append("B시작")
+        await asyncio.sleep(0.01)
+        order.append("B끝")
+
+    orig_pipeline, orig_batch = tasks._run_pipeline, tasks._send_topic_batches
+    tasks._run_pipeline, tasks._send_topic_batches = fake_pipeline, fake_batch
+    try:
+        await asyncio.gather(tasks.process_disclosures(), tasks.send_topic_batches())
+    finally:
+        tasks._run_pipeline, tasks._send_topic_batches = orig_pipeline, orig_batch
+    check("폴링이 끝나기 전에 묶음이 끼어들지 않음",
+          order.index("P끝") == order.index("P시작") + 1, True)
+    check("묶음이 끝나기 전에 폴링이 끼어들지 않음",
+          order.index("B끝") == order.index("B시작") + 1, True)
+
+    # ── 파트 3d: 한 사용자의 실패가 묶음 전체를 죽이지 않는다 ───────
+    # 2026-09-30 실측: except 블록이 rollback() 뒤에 user.chat_id를 읽었다.
+    # rollback은 세션의 ORM 객체를 만료시키므로 그 접근이 지연 로딩을 일으켜
+    # 에러 핸들러 자체가 터졌다 — 원래 예외는 영영 보이지 않고 그 사이클의
+    # 남은 사용자는 통째로 건너뛰었다. chat_id는 try 진입 전에 잡아 둔다.
+    # 앞선 묶음 기록을 지워 같은 공시를 다시 '미발송' 상태로 되돌린다
+    async with AsyncSessionLocal() as s2:
+        from sqlalchemy import delete as sql_delete
+        from models import SeenDisclosure as SD
+        await s2.execute(sql_delete(SD).where(SD.summary == "[유형 구독 묶음]"))
+        await s2.commit()
+
+    state["batches"].clear()
+    failed_for = []
+    # tasks가 함수 안에서 notifier를 import하므로 모듈 쪽을 바꿔야 한다
+    orig_send = notif.send_with_keyboard
+
+    async def flaky(chat_id, text, keyboard):
+        if chat_id == "geonsoo" and "geonsoo" not in failed_for:
+            failed_for.append("geonsoo")
+            raise RuntimeError("telegram 500")
+        return await orig_send(chat_id, text, keyboard)
+
+    notif.send_with_keyboard = flaky
+    try:
+        await tasks.send_topic_batches()   # 예외가 새면 이 줄에서 실패한다
+        check("한 사용자가 실패해도 예외가 새지 않음", True)
+    except Exception as e:
+        check("한 사용자가 실패해도 예외가 새지 않음", f"예외 누출: {e}", True)
+    finally:
+        notif.send_with_keyboard = orig_send
+    check("실패한 사용자 외 나머지는 묶음을 받음",
+          [c for c, _, _ in state["batches"]], ["both"])
+
     # ── 파트 4: 삭제 ─────────────────────────────────────────────────
     counts = await user_service.delete_user_data("geonsoo")
     check("삭제 집계에 구독 포함", counts["topics"], 1)
