@@ -334,6 +334,11 @@ async def summarize_disclosure(
             "",
             "규칙: 사실만 쓴다. 투자 의견·중요도 평가·전망을 쓰지 않는다.",
             "원문에 없는 숫자를 만들지 않는다.",
+            # 2026-11-02 평가: 원문이 '확정 계약금액 및 계약금액 총액은 부가세별도'
+            # 라고 두 항목에만 단 조건을, 💡가 '모든 금액은 부가세 별도'로 넓혔다.
+            # 연차별 금액의 부가세 여부는 원문에 없다.
+            "원문이 특정 항목에만 단 조건(부가세 별도, 기준 시점, 확정 여부 등)을",
+            "다른 항목이나 '모든 금액'으로 넓히지 않는다. 조건은 원문이 붙인 항목에만 붙인다.",
             "포함할 내용이 없으면 정확히 '없음' 한 단어만 답한다.",
             "",
             "원문:",
@@ -366,6 +371,41 @@ _COMMON_FIELD_LABELS = {
 }
 
 
+def _parse_kdate(value: str, today):
+    """'2026년 11월 06일' → date. 못 읽으면 None."""
+    from datetime import datetime
+    try:
+        norm = value.replace('년 ', '-').replace('월 ', '-').replace('일', '').strip()
+        return datetime.strptime(norm, '%Y-%m-%d').date()
+    except Exception:
+        return None
+
+
+def _append_period(lines, bgd, edd, label: str, countdown_label: str, today):
+    """기간 한 줄 + 개시일 카운트다운. D-day는 코드가 센다(LLM 파생 금지)."""
+    if not bgd:
+        return
+    lines.append(f"• {label}: {bgd}" + (f" ~ {edd}" if edd and edd != '-' else ""))
+    d = _parse_kdate(bgd, today)
+    if d is None:
+        return
+    diff = (d - today).days
+    if diff > 0:
+        lines.append(f"• ⏰ {countdown_label}까지 D-{diff}")
+    elif diff == 0:
+        lines.append(f"• ⏰ {countdown_label}일 (D-Day)")
+
+
+def _append_fund_use(lines, data: dict):
+    """자금조달 목적 — 값이 있는 항목만."""
+    for key, label in (('fdpp_op', '운영'), ('fdpp_dtrp', '채무상환'),
+                       ('fdpp_fclt', '시설'), ('fdpp_bsninh', '타법인 증권 취득'),
+                       ('fdpp_ocsa', '기타자금')):
+        v = data.get(key)
+        if v and v != '-':
+            lines.append(f"• 자금목적({label}): {v}원")
+
+
 def format_typed_disclosure(corp_name: str, report_nm: str, data: dict, today=None) -> str:
     """정형 데이터를 카드 뷰 형식으로 포맷팅.
 
@@ -380,7 +420,7 @@ def format_typed_disclosure(corp_name: str, report_nm: str, data: dict, today=No
 
     lines = []
 
-    if '전환사채' in report_nm or '교환사채' in report_nm:
+    if '전환사채' in report_nm:
         lines.append("[전환사채 발행결정]")
         if data.get('bd_fta'): lines.append(f"• 발행금액: {data['bd_fta']}원")
         if data.get('bd_knd'): lines.append(f"• 종류: {data['bd_knd']}")
@@ -404,7 +444,72 @@ def format_typed_disclosure(corp_name: str, report_nm: str, data: dict, today=No
                 pass
         if data.get('fdpp_op') and data['fdpp_op'] != '-': lines.append(f"• 자금목적(운영): {data['fdpp_op']}원")
         if data.get('fdpp_dtrp') and data['fdpp_dtrp'] != '-': lines.append(f"• 자금목적(채무상환): {data['fdpp_dtrp']}원")
-        if data.get('act_mktprcfl_cvprc_lwtrsprc_bs'): lines.append(f"• 리픽싱: {data['act_mktprcfl_cvprc_lwtrsprc_bs']}")
+        # 빈 값은 '-'로 내려온다 — 다른 필드처럼 걸러야 '• 리픽싱: -' 같은 줄이 안 나간다
+        if data.get('act_mktprcfl_cvprc_lwtrsprc_bs') not in (None, '', '-'):
+            lines.append(f"• 리픽싱: {_one_line(data['act_mktprcfl_cvprc_lwtrsprc_bs'])}")
+
+    elif '교환사채' in report_nm:
+        # 교환사채를 전환사채와 같은 분기에 두면 안 된다. CB는 신주로 전환돼
+        # 희석되고, EB는 이미 있는 주식(자기주식·보유 지분)과 교환된다 — 다른
+        # 상품이다. 2026-11-02 홀드아웃에서 HD현대 5,887억(자회사 HD현대마린
+        # 솔루션 주식과 교환)과 모트렉스 590억이 '전환사채 발행결정'으로 표기됐다.
+        # 게다가 EB 응답에는 cv_prc·cvrqpd_bgd가 없어 교환가액·교환기간이
+        # 통째로 빠지고 '교환 대상이 무엇인가'라는 핵심이 사라졌다.
+        # 필드명은 두 건의 실제 응답으로 검증했다(§4.2).
+        lines.append("[교환사채 발행결정]")
+        if data.get('bd_fta'): lines.append(f"• 발행금액: {data['bd_fta']}원")
+        if data.get('bd_knd'): lines.append(f"• 종류: {data['bd_knd']}")
+        if data.get('extg'): lines.append(f"• 교환대상: {_one_line(data['extg'])}")
+        if data.get('extg_stkcnt'): lines.append(f"• 교환대상 주식수: {data['extg_stkcnt']}주")
+        if data.get('ex_prc'): lines.append(f"• 교환가액: {data['ex_prc']}원")
+        if data.get('ex_rt'): lines.append(f"• 교환비율: {data['ex_rt']}%")
+        if data.get('bd_intr_ex'): lines.append(f"• 표면이자율: {data['bd_intr_ex']}%")
+        if data.get('bd_intr_sf'): lines.append(f"• 만기이자율: {data['bd_intr_sf']}%")
+        if data.get('bd_mtd'): lines.append(f"• 만기일: {data['bd_mtd']}")
+        _append_period(lines, data.get('exrqpd_bgd'), data.get('exrqpd_edd'),
+                       '교환청구기간', '교환청구 개시', today)
+        _append_fund_use(lines, data)
+
+    elif '신주인수권' in report_nm:
+        # 분기가 없어 공통 폴백으로 떨어지면서 '• 이사회결의일' 한 줄만 나갔다.
+        # 2026-10-29 다스코 60억·희석률 8.97%가 그렇게 발송됐다 — 애널리스트가
+        # 볼 값(행사가액·희석률·분리형 여부)이 전부 빠진 채로. 필드명은 실제
+        # bdwtIsDecsn 응답으로 검증했다(§4.2).
+        lines.append("[신주인수권부사채 발행결정]")
+        if data.get('bd_fta'): lines.append(f"• 발행금액: {data['bd_fta']}원")
+        if data.get('bd_knd'): lines.append(f"• 종류: {data['bd_knd']}")
+        if data.get('ex_prc'): lines.append(f"• 행사가액: {data['ex_prc']}원")
+        if data.get('ex_rt'): lines.append(f"• 행사비율: {data['ex_rt']}%")
+        # 분리형이면 신주인수권만 떼어 유통된다 — 희석 경로가 달라지는 값이다.
+        if data.get('bdwt_div_atn'): lines.append(f"• 분리형 여부: {data['bdwt_div_atn']}")
+        if data.get('nstk_pym_mth'): lines.append(f"• 신주대금 납입방법: {data['nstk_pym_mth']}")
+        if data.get('nstk_isstk_cnt'):
+            line = f"• 행사 시 발행주식수: {data['nstk_isstk_cnt']}주"
+            if data.get('nstk_isstk_tisstk_vs'):
+                line += f" (발행주식총수 대비 {data['nstk_isstk_tisstk_vs']}%)"
+            lines.append(line)
+        if data.get('bd_intr_ex'): lines.append(f"• 표면이자율: {data['bd_intr_ex']}%")
+        if data.get('bd_intr_sf'): lines.append(f"• 만기이자율: {data['bd_intr_sf']}%")
+        if data.get('bd_mtd'): lines.append(f"• 만기일: {data['bd_mtd']}")
+        _append_period(lines, data.get('expd_bgd'), data.get('expd_edd'),
+                       '행사기간', '행사 개시', today)
+        if data.get('act_mktprcfl_cvprc_lwtrsprc'):
+            lines.append(f"• 리픽싱 최저 행사가액: {data['act_mktprcfl_cvprc_lwtrsprc']}원")
+        _append_fund_use(lines, data)
+
+    elif '무상증자' in report_nm:
+        # 분기 없음 — 신주인수권과 같은 폴백 구멍이었다. 필드명은 실제
+        # fricDecsn 응답(2026-10-07 알파칩스)으로 검증했다(§4.2).
+        lines.append("[무상증자 결정]")
+        if data.get('nstk_ostk_cnt'): lines.append(f"• 신주 발행수(보통주): {data['nstk_ostk_cnt']}주")
+        if data.get('nstk_ascnt_ps_ostk'):
+            lines.append(f"• 1주당 배정 주식수: {data['nstk_ascnt_ps_ostk']}주")
+        if data.get('fv_ps'): lines.append(f"• 액면가: {data['fv_ps']}원")
+        if data.get('bfic_tisstk_ostk'):
+            lines.append(f"• 증자 전 발행주식수: {data['bfic_tisstk_ostk']}주")
+        if data.get('nstk_asstd'): lines.append(f"• 신주배정 기준일: {data['nstk_asstd']}")
+        if data.get('nstk_dividrk'): lines.append(f"• 배당기산일: {data['nstk_dividrk']}")
+        if data.get('nstk_lstprd'): lines.append(f"• 신주 상장 예정일: {data['nstk_lstprd']}")
 
     elif '유상증자' in report_nm:
         lines.append("[유상증자 결정]")
@@ -545,25 +650,19 @@ async def summarize_typed_disclosure(
         await _notify_budget_once()
         return card
 
-    # AI로 추가 인사이트 보완
-    # 규칙은 2026-08-18 평가에서 judge가 잡은 실제 위반 유형을 하나씩 막는다:
-    # 새 수치 파생(주당단가·일수 계산), 배정액을 총액으로 단정, '미제공' 서술,
-    # 데이터에 없는 사실(주총 결과·지분율 변화) 단정.
-    prompt = chr(10).join([
-        f"기업명: {corp_name}",
-        f"공시 유형: {report_nm}",
-        f"공시 핵심 데이터:",
-        card,
-        "",
-        "위 데이터에서 투자자가 주목할 핵심 포인트 1-2줄만 추가하세요. 규칙:",
-        "1. 카드에 적힌 수치·날짜만 언급한다. 새 수치를 계산하지 않는다 (주당 단가, 남은 일수, 합계, 비율 환산 금지).",
-        "2. 자금목적 배정액을 '총 발행금액'이나 '조달 총액'으로 단정하지 않는다.",
-        "3. 카드에 없는 항목은 언급 자체를 하지 않는다 ('미제공', '정보 없음' 같은 서술 금지).",
-        "4. 카드에 없는 사실(주주총회 결과, 지분율 변화 등)을 단정하지 않는다.",
-        "5. 매수/매도/호재/악재 등 투자 판단 표현을 쓰지 않는다.",
-    ])
-    
-    return await _append_ai_comment(card, prompt, data)
+    # 💡 코멘트를 붙이지 않는다 — 정형 경로에는 덧붙일 것이 없다.
+    #
+    # 2026-11-02 홀드아웃 35건 실측: 전부 💡가 붙었고, **카드에 없는 숫자를
+    # 추가한 건 0건**이었다. 정형 응답이 곧 데이터이고 카드가 그걸 전부 렌더하므로
+    # 코멘트가 할 수 있는 일은 같은 값을 바꿔 말하는 것뿐이다. 그리고 바꿔 말하다
+    # 틀렸다: judge가 잡은 불충실 4건 중 2건이 코멘트에서 나왔다 — 프롬프트
+    # 머리말을 그대로 출력(3건)하고, 회사명을 '유티아이'에서 '유티아'로 깨뜨렸다.
+    # 규칙을 다섯 개나 달아 막아온 것들인데, 얻는 정보가 0이면 규칙을 더 다는 게
+    # 아니라 경로를 없애는 것이 맞다.
+    #
+    # 비정형(공급계약) 경로의 💡는 유지한다 — 거기엔 표에 없는
+    # '기타 투자판단' 섹션이 있고, 실측에서 고유한 사실을 담았다(#79).
+    return card
 
 
 # 💡 코멘트 전용 판단 표현 필터. 티어0의 투자의견 검사는 매수/매도/호재 같은
