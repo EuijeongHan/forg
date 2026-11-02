@@ -235,7 +235,10 @@ async def summarize_by_receipt(receipt_no: str, hint: dict | None = None) -> dic
     }
 
     # 실패/한도 폴백 요약은 캐시하지 않는다 — 다음 조회에서 재시도 가능해야 함
-    if summary and "실패했습니다" not in summary and "한도에 도달" not in summary:
+    # '읽지 못했습니다'도 캐시하지 않는다 — 원문 조회는 일시적으로 실패하므로
+    # 다음 클릭에서 다시 받아와야 한다(2026-10-13·16 두 건 모두 재조회는 정상).
+    if (summary and "실패했습니다" not in summary and "한도에 도달" not in summary
+            and "읽지 못했습니다" not in summary):
         if len(_summary_cache) >= _SUMMARY_CACHE_MAX:
             _summary_cache.clear()
         _summary_cache[receipt_no] = result

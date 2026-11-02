@@ -319,7 +319,7 @@ async def fetch_disclosure_detail(receipt_no: str) -> str:
     try:
         main_url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt_no}"
         async with httpx.AsyncClient(follow_redirects=True) as client:
-            r = await client.get(main_url, timeout=DART_TIMEOUT)
+            r = await _get_with_retry(client, main_url)
             m = _VIEW_DOC_RE.search(_decode(r))
             if m:
                 _, dcm_no, ele_id, offset, length, dtd = m.groups()
@@ -336,13 +336,16 @@ async def fetch_disclosure_detail(receipt_no: str) -> str:
             f"&eleId={ele_id}&offset={offset}&length={length}&dtd={dtd}"
         )
         async with httpx.AsyncClient(follow_redirects=True) as client:
-            r = await client.get(viewer_url, timeout=DART_TIMEOUT)
+            r = await _get_with_retry(client, viewer_url)
             parser = TextExtractor()
             parser.feed(_decode(r))
             text = " ".join(parser.text)
             return text[:5000]
     except Exception as e:
-        print(f"공시 원문 조회 실패: {e}")
+        # 타입까지 남긴다 — 타임아웃은 str(e)가 비어 '조회 실패: '만 찍힌다.
+        # 2026-10-13 피아이이·10-16 제이티가 여기서 빈 본문이 됐고, 둘 다
+        # 나중에 다시 받아보면 정상이었다(일시적 실패).
+        print(f"공시 원문 조회 실패 (rcept_no={receipt_no}): {type(e).__name__}: {e}")
         return ""
 
 

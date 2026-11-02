@@ -92,6 +92,46 @@ body = " ".join(parser.text)
 for want in ["27,593,490,000", "6.99", "한국수력원자력", "2026-09-01", "2029-08-31"]:
     check(f"본문에 {want} 포함", want in body)
 
+
+
+# ── 원문을 못 읽었으면 요약하지 않는다 (2026-11-02 이용 기록) ─────────
+# 이전에는 LLM에게 '유형만 보고 한 문장 설명'을 시켰고, 사용자는 이런 걸 받았다:
+#   "…공시는 특정 계약에 따른 매출 규모, 기간, 거래 상대방 관계 등을 포함하는
+#    중요 계약 내용을 보고하는 공시입니다"
+# 그 공시에 대한 사실이 0개인데 요약처럼 보이고, 실패 문구가 없어 캐시까지 됐다.
+# 10-13 피아이이·10-16 제이티에서 실제로 그랬으며 두 건 다 재조회는 정상이었다.
+import asyncio as _asyncio  # noqa: E402
+import summarizer as _sm  # noqa: E402
+
+
+def _empty_summary():
+    called = []
+
+    async def should_not_run(prompt):
+        called.append(prompt)
+        return "제이티의 공급계약 공시는 중요 계약 내용을 보고하는 공시입니다."
+
+    orig = _sm._generate_with_fallback
+    _sm._generate_with_fallback = should_not_run
+    try:
+        out = _asyncio.run(_sm.summarize_disclosure("제이티", "단일판매ㆍ공급계약체결", ""))
+    finally:
+        _sm._generate_with_fallback = orig
+    return out, called
+
+
+out, called = _empty_summary()
+check("빈 원문이면 LLM을 부르지 않음", called == [])
+check("못 읽었다고 밝힌다", "읽지 못했습니다" in out)
+check("유형 설명을 지어내지 않음", "보고하는 공시입니다" not in out)
+check("원문으로 안내", "DART" in out)
+
+# 이 문구는 캐시되지 않아야 다음 클릭에서 재조회된다
+import services.disclosure_service as _ds  # noqa: E402
+import inspect as _inspect  # noqa: E402
+_src = _inspect.getsource(_ds.summarize_by_receipt)
+check("'읽지 못했습니다'는 캐시 제외 조건에 포함", "읽지 못했습니다" in _src)
+
 if failures:
     print(f"\n{len(failures)}건 실패: {failures}")
     sys.exit(1)
