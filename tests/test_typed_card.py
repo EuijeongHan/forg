@@ -4,6 +4,11 @@
   2. 유상증자: 증자방식 실제 키(ic_mthn) 미조회 → 카드 공백 → '미제공' 서술 유발
   3. 자기주식 처분: dppln_* 필드 전체 누락 (씨젠 사례)
   4. 합병: mgptncmp_cmpnm/mgsc_mgdt 미조회 + rs_sm_atn 주총 오표기(홀드아웃에서 확인)
+
+2026-11-02 새 홀드아웃(35건)이 찾은 것:
+  5. 교환사채가 '전환사채 발행결정'으로 표기 — 같은 분기를 쓰고 있었다.
+     EB에는 cv_prc·cvrqpd_bgd가 없어 교환가액·교환기간·교환대상이 통째로 빠졌다.
+  6. 신주인수권·무상증자는 분기 자체가 없어 '• 이사회결의일' 한 줄만 나갔다.
 """
 import datetime
 import os
@@ -114,25 +119,134 @@ CB = {"bd_fta": "62,500,000,000", "fdpp_op": "30,000,000,000",
       "cv_prc": "33,255", "bd_mtd": "2056년 09월 04일"}
 
 
-async def _summary_with_comment(comment):
+# 이 가드는 2026-08-18 홀드아웃의 1000배 오기(300억 → 30조)에서 나왔다.
+# 정형 경로는 2026-11-02부터 💡를 아예 달지 않으므로(아래 참조), 가드 자체를
+# 직접 호출해 검증한다 — 남아 있는 사용처는 비정형(공급계약) 경로다.
+CARD = "[전환사채 발행결정]\n• 발행금액: 62,500,000,000원"
+
+
+async def _guarded(comment):
     async def fake(prompt):
         return comment
     orig = summarizer._generate_with_fallback
     summarizer._generate_with_fallback = fake
     try:
-        return await summarizer.summarize_typed_disclosure(
-            "서진시스템", "주요사항보고서(전환사채권발행결정)", CB)
+        return await summarizer._append_ai_comment(CARD, "p", CB)
     finally:
         summarizer._generate_with_fallback = orig
 
 
-bad = asyncio.run(_summary_with_comment("자금목적은 30,000,000,000,000원입니다."))
+bad = asyncio.run(_guarded("자금목적은 30,000,000,000,000원입니다."))
 check("근거 없는 대형 금액이 든 코멘트는 폐기", "30,000,000,000,000" not in bad)
 check("코멘트를 버려도 카드는 그대로 발송", "62,500,000,000원" in bad)
 check("폐기 시 💡 블록 자체가 없음", "💡" not in bad)
 
-good = asyncio.run(_summary_with_comment("자금목적(운영)은 30,000,000,000원입니다."))
+good = asyncio.run(_guarded("자금목적(운영)은 30,000,000,000원입니다."))
 check("정형 근거가 있는 코멘트는 유지", "💡" in good and "30,000,000,000원" in good)
+
+
+
+# ── 빈 값('-')인 필드는 줄을 만들지 않는다 (2026-11-02 홀드아웃) ──────
+cb_refix = format_typed_disclosure("광진실업", "주요사항보고서(전환사채권발행결정)", {
+    'bd_fta': '10,000,000,000', 'cv_prc': '3,580',
+    'act_mktprcfl_cvprc_lwtrsprc_bs': '-',
+}, today=TODAY)
+check("리픽싱이 '-'면 줄 자체가 없음", "리픽싱" not in cb_refix)
+check("값이 있으면 리픽싱을 표시", "리픽싱: 시가하락 시 조정" in format_typed_disclosure(
+    "x", "주요사항보고서(전환사채권발행결정)",
+    {'bd_fta': '1', 'act_mktprcfl_cvprc_lwtrsprc_bs': '시가하락 시 조정'}, today=TODAY))
+
+# ── D-day는 코드가 센다 — 2026-11-02 judge가 D-378이라 주장했으나 379일이 맞다
+import datetime as _dt
+check("D-day 계산이 달력과 일치",
+      f"D-{(_dt.date(2027,11,16) - _dt.date(2026,11,2)).days}" in format_typed_disclosure(
+          "광진실업", "주요사항보고서(전환사채권발행결정)",
+          {'bd_fta': '1', 'cvrqpd_bgd': '2027년 11월 16일'},
+          today=_dt.date(2026, 11, 2)))
+
+
+# ── 5. 교환사채는 전환사채와 다른 상품이다 (2026-11-02 홀드아웃) ──────
+# CB는 신주로 전환돼 희석되고, EB는 이미 있는 주식과 교환된다. HD현대 5,887억은
+# 자회사(HD현대마린솔루션) 주식과 교환하는 사채인데 '전환사채'로 나갔다.
+# 필드명은 실제 exbdIsDecsn 응답 2건으로 검증했다.
+eb = format_typed_disclosure("HD현대", "주요사항보고서(교환사채권발행결정)", {
+    'bd_fta': '588,667,443,000', 'bd_knd': '무기명식 무보증 사모 교환사채',
+    'bd_intr_ex': '0.0', 'bd_intr_sf': '0.0', 'bd_mtd': '2031년 11월 26일',
+    'ex_prc': '247,000', 'ex_rt': '100',
+    'extg': '에이치디현대마린솔루션 주식회사 기명식 보통주', 'extg_stkcnt': '2,383,269',
+    'exrqpd_bgd': '2026년 11월 27일', 'exrqpd_edd': '2031년 10월 26일',
+    'fdpp_dtrp': '588,667,443,000',
+}, today=TODAY)
+check("EB: 전환사채로 표기하지 않음", "전환사채" not in eb)
+check("EB: 교환사채로 표기", "[교환사채 발행결정]" in eb)
+check("EB: 교환대상을 밝힘(무엇과 교환되는가)",
+      "에이치디현대마린솔루션" in eb and "교환대상" in eb)
+check("EB: 교환가액", "교환가액: 247,000원" in eb)
+check("EB: 교환청구기간", "2026년 11월 27일 ~ 2031년 10월 26일" in eb)
+check("EB: 전환가액이라는 말을 쓰지 않음", "전환가액" not in eb)
+
+# ── 6. 신주인수권부사채 — 분기가 없어 한 줄만 나가던 것 ──────────────
+# 2026-10-29 다스코 60억·희석률 8.97%가 '• 이사회결의일' 한 줄로 발송됐다.
+bw = format_typed_disclosure("다스코", "주요사항보고서(신주인수권부사채권발행결정)", {
+    'bddd': '2026년 10월 29일', 'bd_fta': '6,000,000,000',
+    'bd_knd': '무기명식 무보증 사모 신주인수권부사채',
+    'bd_intr_ex': '0.0', 'bd_intr_sf': '0.0', 'bd_mtd': '2031년 11월 06일',
+    'ex_prc': '3,006', 'ex_rt': '100', 'bdwt_div_atn': '비분리',
+    'nstk_pym_mth': '대용납입', 'nstk_isstk_cnt': '1,996,007',
+    'nstk_isstk_tisstk_vs': '8.97', 'act_mktprcfl_cvprc_lwtrsprc': '2,706',
+    'expd_bgd': '2027년 11월 06일', 'expd_edd': '2031년 10월 06일',
+    'fdpp_dtrp': '6,000,000,000',
+}, today=TODAY)
+check("BW: 공통 폴백이 아니라 전용 카드", "[신주인수권부사채 발행결정]" in bw)
+check("BW: 발행금액", "6,000,000,000원" in bw)
+check("BW: 행사가액", "행사가액: 3,006원" in bw)
+check("BW: 희석률을 발행주식수 옆에 붙임",
+      "1,996,007주 (발행주식총수 대비 8.97%)" in bw)
+check("BW: 분리형 여부", "분리형 여부: 비분리" in bw)
+check("BW: 신주대금 납입방법", "대용납입" in bw)
+check("BW: 리픽싱 최저 행사가액", "2,706원" in bw)
+check("BW: 한 줄짜리가 아님", len([l for l in bw.splitlines() if l.startswith("•")]) >= 10)
+
+# ── 무상증자 — 같은 폴백 구멍 (실제 fricDecsn 응답으로 검증) ─────────
+fric = format_typed_disclosure("알파칩스", "주요사항보고서(무상증자결정)", {
+    'bddd': '2026년 10월 07일', 'nstk_ostk_cnt': '6,661,742', 'fv_ps': '500',
+    'bfic_tisstk_ostk': '6,661,742', 'nstk_asstd': '2026년 10월 22일',
+    'nstk_ascnt_ps_ostk': '1', 'nstk_dividrk': '2026년 01월 01일',
+    'nstk_lstprd': '2026년 11월 19일',
+}, today=TODAY)
+check("무상증자: 전용 카드", "[무상증자 결정]" in fric)
+check("무상증자: 1주당 배정 주식수", "1주당 배정 주식수: 1주" in fric)
+check("무상증자: 신주배정 기준일", "신주배정 기준일: 2026년 10월 22일" in fric)
+check("무상증자: 신주 상장 예정일", "2026년 11월 19일" in fric)
+check("무상증자를 유상증자로 표기하지 않음", "[유상증자" not in fric)
+
+# ── 정형 경로에는 💡를 붙이지 않는다 ─────────────────────────────────
+# 홀드아웃 35건 전부에 💡가 붙었는데 카드에 없는 숫자를 추가한 건 0건이었다.
+# 정형 응답이 곧 데이터이므로 코멘트는 바꿔 말하는 것뿐이고, 그러다 프롬프트
+# 머리말을 출력(3건)하고 회사명을 '유티아이'→'유티아'로 깨뜨렸다.
+import asyncio  # noqa: E402
+import summarizer  # noqa: E402
+
+async def _typed(data, report="주요사항보고서(유상증자결정)"):
+    called = []
+    async def should_not_run(prompt):
+        called.append(prompt)
+        return "💡 덧붙인 말"
+    orig = summarizer._generate_with_fallback
+    summarizer._generate_with_fallback = should_not_run
+    try:
+        out = await summarizer.summarize_typed_disclosure("유티아이", report, data)
+    finally:
+        summarizer._generate_with_fallback = orig
+    return out, called
+
+out, called = asyncio.run(_typed({
+    'ic_mthn': '제3자배정증자', 'nstk_ostk_cnt': '711,989', 'fv_ps': '500',
+    'bfic_tisstk_ostk': '21,569,319', 'fdpp_op': '1,324,299,540',
+}))
+check("정형 카드에 💡 없음", "💡" not in out)
+check("정형 경로는 LLM을 부르지 않음", called == [])
+check("카드 수치는 그대로", "711,989주" in out and "1,324,299,540원" in out)
 
 if failures:
     print(f"\n{len(failures)}건 실패: {failures}")

@@ -124,16 +124,35 @@ async def main():
     check("숫자에 없는 단위를 붙이지 않음", "36.48537%" in card, False)
 
     # ── 폴백: 분기 없는 유형도 raw 키를 노출하지 않는다 ──────────────
+    # 예시 유형이 '무상증자결정'이었는데 2026-11-02에 전용 분기가 생겼다
+    # (그전까지 '• 이사회결의일' 한 줄만 나가던 구멍). 폴백은 '앞으로 추가될
+    # 유형'을 위한 방어선이므로, 어느 분기에도 걸리지 않는 이름으로 검증한다.
     fb = summarizer.format_typed_disclosure(
-        "테스트", "무상증자결정",
+        "테스트", "주요사항보고서(채무인수결정)",
         {"bddd": "2026년 08월 21일", "ffdtl_cpt": "1,000", "zzz_unknown": "값",
          "corp_code": "00000000"})
     check("폴백도 raw 키 미노출", "bddd" in fb or "zzz_unknown" in fb, False)
     check("폴백은 검증된 필드만 한글 라벨", "이사회결의일: 2026년 08월 21일" in fb, True)
     check("모르는 키의 값도 노출 안 함", "값" in fb, False)
 
-    fb2 = summarizer.format_typed_disclosure("테스트", "무상증자결정", {"zzz": "x"})
+    fb2 = summarizer.format_typed_disclosure("테스트", "주요사항보고서(채무인수결정)",
+                                             {"zzz": "x"})
     check("표시할 게 없으면 원문 확인 안내", "원문을 확인" in fb2, True)
+
+    # ── 정형 API가 있는 유형은 전부 전용 분기를 가져야 한다 ───────────
+    # 신주인수권·무상증자는 TYPED_APIS에 등록돼 정형 응답까지 받아오면서 카드
+    # 분기가 없어, 60억 BW(희석률 8.97%)가 '• 이사회결의일' 한 줄로 나갔다.
+    # 조용한 구멍이라 평가 없이는 보이지 않는다 — 구조로 막는다.
+    from dart import TYPED_APIS
+    thin = []
+    for kind in TYPED_APIS:
+        card = summarizer.format_typed_disclosure(
+            "테스트", f"주요사항보고서({kind}결정)",
+            {"bddd": "2026년 08월 21일"})
+        # 전용 분기는 '[…]' 머리말을 단다. 폴백엔 머리말이 없다.
+        if not card.startswith("["):
+            thin.append(kind)
+    check("정형 유형 중 분기 없는 것", thin, [])
     check("빈 경우에도 raw 키 없음", "zzz" in fb2, False)
 
     # ── 피드백 ②: 조회 결과 페이지 넘김 ─────────────────────────────
