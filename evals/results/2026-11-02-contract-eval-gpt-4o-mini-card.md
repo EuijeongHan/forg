@@ -18,7 +18,7 @@
   "judge": {
     "model": "gpt-5",
     "judged": 18,
-    "faithful_rate": 0.944,
+    "faithful_rate": 1.0,
     "items_with_missing": 2,
     "opinion_flags": 0
   }

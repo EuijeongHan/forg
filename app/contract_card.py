@@ -18,6 +18,10 @@ import re
 # '계약금액'이 '계약금액 총액(원)'을 먼저 잘라먹지 않게 한다.
 _LABELS = [
     "판매ㆍ공급계약 내용", "판매ㆍ공급계약 구분", "체결계약명", "계약내역",
+    # 해지 공시는 라벨이 따로다(2026-10-21 한국종합기술 310억 실측). 체결 양식만
+    # 알던 파서가 해지금액을 못 찾아 카드를 포기했고, LLM 폴백이 '정보 없음'을 냈다.
+    "판매ㆍ공급계약 해지 구분", "해지계약명", "해지내역", "해지금액(원)", "해지금액",
+    "해지 주요사유", "해지사유", "해지일자",
     "조건부 계약여부", "확정 계약금액", "조건부 계약금액", "계약금액 총액(원)",
     "계약금액", "최근 매출액(원)", "최근매출액(원)", "매출액 대비(%)", "매출액대비(%)",
     "대규모법인여부", "계약상대방", "계약상대", "주요사업",
@@ -36,6 +40,8 @@ _LABEL_ALT = "|".join(re.escape(x) for x in sorted(_LABELS, key=len, reverse=Tru
 # 정확히 그랬다(계약상대방 '방', 계약기간 '… ~ 변경 4. 정정사항', 정정 전 금액).
 # 본문은 항상 '1. 판매ㆍ공급계약'으로 시작하므로 그 지점부터 읽는다.
 _BODY_ANCHOR = re.compile(r"1\s*\.\s*판매ㆍ공급계약")
+# 해지 공시 판별 — 보고서명이 아니라 본문 양식으로 본다(보고서명 표기가 흔들린다)
+_TERMINATION = re.compile(r"1\s*\.\s*판매ㆍ공급계약\s*해지|2\s*\.\s*해지내역|해지금액")
 _CORRECTION_REASON = re.compile(r"정정사유\s*(.*?)(?=\s*\d+\s*\.\s*정정사항|\s*정정사항|$)", re.S)
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
@@ -86,6 +92,15 @@ def _value_free(text: str, label: str) -> str:
     return re.sub(r"^[-\s]+|[-\s]+$", "", v)
 
 
+def _has_label(text: str, label: str) -> bool:
+    """라벨이 본문에 존재하는가.
+
+    값이 '-'인 것(공시유보)과 라벨 자체가 없는 것(양식이 다름)은 뜻이 다르다.
+    전자는 '유보'라고 쓸 수 있고, 후자는 우리가 못 읽은 것이다.
+    """
+    return label in text
+
+
 def _amount(text: str, label: str) -> str:
     """라벨 뒤 첫 숫자만. 뒤따르는 다른 항목의 숫자를 삼키지 않는다."""
     v = _value_after(text, label)
@@ -111,6 +126,21 @@ def parse_contract(text: str) -> dict:
     full, text = text, _body(text)
     out: dict[str, str] = {}
 
+    if _TERMINATION.search(text):
+        out["해지"] = "y"
+        name = _value_after(text, "해지계약명")
+        if name:
+            out["계약명"] = _clip(name, 120)
+        amount = _amount(text, "해지금액(원)") or _amount(text, "해지금액")
+        if amount:
+            out["계약금액"] = amount
+        reason = _value_free(text, "해지 주요사유") or _value_free(text, "해지사유")
+        if reason:
+            out["해지사유"] = _clip(reason, 200)
+        m = _DATE.search(_value_after(text, "해지일자"))
+        if m:
+            out["해지일자"] = m.group(0)
+
     if "정정" in full[:200]:
         reason = " ".join(_CORRECTION_REASON.search(full).group(1).split())[:80] \
             if _CORRECTION_REASON.search(full) else ""
@@ -125,6 +155,21 @@ def parse_contract(text: str) -> dict:
               or _amount(text, "계약금액"))
     if amount:
         out["계약금액"] = amount
+    elif not out.get("계약금액") and _has_label(text, "계약금액"):
+        # '계약금액'을 포함하는 라벨이 본문에 있는데 값이 비었다 = 공시가 금액을
+        # 유보한 것이다. 양식마다 라벨이 다르다 — 일반형은 '확정 계약금액'과
+        # '계약금액 총액(원)', 건설·기타형은 '계약금액(원)'(2026-09-23 한화시스템).
+        # 라벨 변형을 일일이 적으면 또 빠지므로 공통 부분으로 본다.
+        #
+        # 파싱 실패를 유보로 오표기할 여지는 있다. 그래도 그편이 낫다 — 카드를
+        # 포기하면 LLM이 그 자리를 메우고, 2026-10-27 스튜디오미르에서 실제로
+        # 최근 매출액을 '계약금액'으로 적어 보냈다. 유보라고 쓰면 최소한
+        # 없는 숫자를 만들지는 않는다.
+        # 라벨은 있는데 값이 비었다 = 공시가 금액을 유보한 것이다. 카드를 포기하면
+        # LLM 폴백이 그 자리를 메우는데, 2026-10-27 스튜디오미르에서 실제로
+        # 최근 매출액 16,391,297,221원을 '계약금액'으로 적어 보냈다. 유보는
+        # 유보라고 쓴다 — 그게 사실이고, 숫자를 바꿔치기하는 것보다 훨씬 낫다.
+        out["금액유보"] = "y"
     # '최근 매출액(원)'은 계약상대방 항목에도 또 나온다 — 앞의 것(자사)만 쓴다.
     head = text.split("계약상대")[0] if "계약상대" in text else text
     revenue = _amount(head, "최근 매출액(원)") or _amount(head, "최근매출액(원)")
@@ -171,8 +216,32 @@ def parse_contract(text: str) -> dict:
 def format_contract_card(corp_name: str, report_nm: str, text: str) -> str:
     """파싱 결과를 카드로. 필수 항목을 못 뽑으면 빈 문자열(→ LLM 경로로 폴백)."""
     d = parse_contract(text)
-    if not d.get("계약금액") or not (d.get("계약상대방") or d.get("계약명")):
+
+    # 금액은 '있다/없다'가 아니라 '있다/유보됐다/못 읽었다' 셋이다. 유보까지
+    # 포기 사유로 두면 LLM이 그 자리를 다른 숫자로 메운다(2026-10-27 실측).
+    has_amount = bool(d.get("계약금액") or d.get("금액유보"))
+    if not has_amount or not (d.get("계약상대방") or d.get("계약명")):
         return ""
+
+    if d.get("해지"):
+        # 해지는 체결의 반대 방향 중대 이벤트다 — 이미 알린 계약이 사라지는 것이라
+        # 금액·상대방만큼 '왜'가 중요하다.
+        lines = ["[단일판매·공급계약 해지]"]
+        if d.get("계약명"):
+            lines.append(f"• 해지계약명: {d['계약명']}")
+        if d.get("계약금액"):
+            lines.append(f"• 해지금액: {d['계약금액']}원")
+        if d.get("최근매출액"):
+            lines.append(f"• 최근 매출액: {d['최근매출액']}원")
+        if d.get("매출액대비"):
+            lines.append(f"• 매출액 대비: {d['매출액대비']}%")
+        if d.get("계약상대방"):
+            lines.append(f"• 계약상대방: {d['계약상대방']}")
+        if d.get("해지일자"):
+            lines.append(f"• 해지일자: {d['해지일자']}")
+        if d.get("해지사유"):
+            lines.append(f"• 해지사유: {d['해지사유']}")
+        return "\n".join(lines)
 
     lines = ["[단일판매·공급계약체결]"]
     if "[기재정정]" in report_nm:
@@ -181,7 +250,12 @@ def format_contract_card(corp_name: str, report_nm: str, text: str) -> str:
         lines.append(f"• 정정사유: {d['정정사유']}")
     if d.get("계약명"):
         lines.append(f"• 계약명: {d['계약명']}")
-    lines.append(f"• 계약금액: {d['계약금액']}원")
+    if d.get("계약금액"):
+        lines.append(f"• 계약금액: {d['계약금액']}원")
+    else:
+        # 금액 유보 — 사유가 있으면 함께. 침묵보다 낫고, 틀린 숫자보다 훨씬 낫다.
+        reason = d.get("유보사유")
+        lines.append("• 계약금액: 공시유보" + (f" ({reason})" if reason else ""))
     if d.get("최근매출액"):
         lines.append(f"• 최근 매출액: {d['최근매출액']}원")
     if d.get("매출액대비"):
